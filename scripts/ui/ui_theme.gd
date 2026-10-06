@@ -1,8 +1,9 @@
 class_name UiTheme
 extends RefCounted
 ## The casino look shared by every HUD element and panel: dark felt panels with
-## gold trim, chunky bold text on the default font, colored chip buttons and
-## the Heat level colors. Also small builders and text helpers the panels share.
+## gold trim, Fredoka body text and Lilita One display text (assets/fonts),
+## colored chip buttons and the Heat level colors. Also small builders and
+## text helpers the panels share.
 ##
 ## Type variations (set `theme_type_variation`):
 ## - Labels: TitleLabel, HeaderLabel, BigLabel, SmallLabel, CardLabel, CardSmallLabel
@@ -211,21 +212,18 @@ static func make_theme() -> Theme:
 	return t
 
 
-## The default font, emboldened: every UI text uses it.
+## Body text: Fredoka SemiBold. Every UI text uses it unless a variation picks heavy_font().
 static func bold_font() -> FontVariation:
 	if _bold == null:
-		_bold = FontVariation.new()
-		_bold.base_font = ThemeDB.fallback_font
-		_bold.variation_embolden = 0.45
+		_bold = ArtKit.body_font(600)
 	return _bold
 
 
-## Extra-chunky weight for titles, headers and big numbers.
+## Display weight for titles, headers, big numbers and buttons-as-signs: Lilita One.
 static func heavy_font() -> FontVariation:
 	if _heavy == null:
 		_heavy = FontVariation.new()
-		_heavy.base_font = ThemeDB.fallback_font
-		_heavy.variation_embolden = 1.0
+		_heavy.base_font = ArtKit.display_font()
 	return _heavy
 
 

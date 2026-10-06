@@ -79,35 +79,45 @@ func test_builds_body_on_player_layer_with_camera_when_local() -> void:
 	assert_not_null(player.model)
 	assert_not_null(player.camera_rig, "local player has a camera")
 	assert_true(player.camera_rig.camera.is_current())
+	assert_not_null(player.hands, "local player has first-person hands")
+	assert_true(player.camera_rig.camera.is_ancestor_of(player.hands), "the hands ride the camera")
 	assert_true(player.is_on_floor(), "stands on the floor")
 	assert_almost_eq(player.global_position.y, 0.0, 0.06)
 	assert_eq(player.state, PlayerCharacter.STATE_FREE)
 	var remote := await _spawn(false, Vector3(4, 0, 0))
 	assert_null(remote.camera_rig, "non-local player has no camera")
+	assert_null(remote.hands, "non-local player has no hands")
 
 
-func test_camera_sits_behind_and_above_and_zooms() -> void:
+func test_camera_is_at_eye_height_and_pitch_is_clamped() -> void:
 	var player := await _spawn()
 	var rig := player.camera_rig
 	await _frames(10)
 	var cam := rig.camera.global_position
-	assert_gt(cam.z, player.global_position.z + 2.0, "behind the player (+Z) at yaw 0")
-	assert_gt(cam.y, Tuning.PLAYER_CAMERA_HEIGHT, "looks down from above")
-	rig.zoom(-100.0)
-	assert_almost_eq(rig.distance, Tuning.PLAYER_CAMERA_MIN_DISTANCE, 0.001)
-	rig.zoom(100.0)
-	assert_almost_eq(rig.distance, Tuning.PLAYER_CAMERA_MAX_DISTANCE, 0.001)
+	assert_almost_eq(cam.y, player.global_position.y + FpTuning.EYE_HEIGHT, 0.03, "first person: the eye")
+	assert_almost_eq(Vector2(cam.x - player.global_position.x, cam.z - player.global_position.z).length(), 0.0, 0.03, "inside the head")
+	assert_almost_eq(rig.camera.fov, FpTuning.FOV, 0.5)
 	rig.add_look(0.0, -10.0)
-	assert_almost_eq(rig.pitch, deg_to_rad(Tuning.PLAYER_CAMERA_PITCH_MIN_DEGREES), 0.001, "pitch clamped")
+	assert_almost_eq(rig.pitch, -deg_to_rad(FpTuning.PITCH_LIMIT_DEGREES), 0.001, "pitch clamped looking down")
+	rig.add_look(0.0, 20.0)
+	assert_almost_eq(rig.pitch, deg_to_rad(FpTuning.PITCH_LIMIT_DEGREES), 0.001, "pitch clamped looking up")
+	rig.zoom(5.0)
+	assert_almost_eq(rig.pitch, deg_to_rad(FpTuning.PITCH_LIMIT_DEGREES), 0.001, "zoom is a no-op in first person")
 
 
-func test_camera_spring_arm_pulls_in_at_a_wall() -> void:
+func test_hands_pull_back_from_a_wall() -> void:
 	var player := await _spawn()
+	player.hands.set_process(false)
+	for i in 30:
+		player.hands.advance(1.0 / 60.0)
+	var open_z := player.hands.hand_node(&"right").position.z
 	var wall := Primitives.static_box(Vector3(6, 4, 0.4), Color.GRAY)
-	wall.position = Vector3(0, 2, 1.6)
+	wall.position = Vector3(0, 2, -0.55)
 	_world.add_child(wall)
-	await _frames(10)
-	assert_lt(player.camera_rig.camera.global_position.z, 1.4, "camera stays in front of the wall")
+	await _frames(3)
+	for i in 40:
+		player.hands.advance(1.0 / 60.0)
+	assert_gt(player.hands.hand_node(&"right").position.z, open_z + 0.05, "hands pulled back toward the eye")
 
 
 # --- Movement -----------------------------------------------------------------
@@ -119,7 +129,7 @@ func test_forward_moves_away_from_the_camera() -> void:
 	var moved := player.global_position - start
 	assert_lt(moved.z, -0.5, "forward is -Z at camera yaw 0")
 	assert_almost_eq(moved.x, 0.0, 0.05)
-	assert_almost_eq(player.facing, 0.0, 0.05, "faces where it walks")
+	assert_almost_eq(player.facing, 0.0, 0.05, "faces where it looks")
 
 
 func test_movement_is_camera_relative() -> void:
@@ -137,7 +147,7 @@ func test_movement_is_camera_relative() -> void:
 	assert_gt(moved.x, 0.5, "right is +X at yaw 0")
 	assert_almost_eq(moved.z, 0.0, 0.05)
 	await _frames(20)
-	assert_almost_eq(player.facing, -PI * 0.5, 0.1, "model turned to face +X")
+	assert_almost_eq(player.facing, 0.0, 0.05, "first person: the body faces the view, not the walk")
 
 
 func test_running_is_faster_than_walking() -> void:
@@ -213,6 +223,9 @@ func test_sit_at_locks_movement_and_stand_up_steps_back() -> void:
 	assert_eq(player.model.pose, &"sit")
 	assert_true(player.global_position.is_equal_approx(seat.origin))
 	assert_almost_eq(player.facing, -PI * 0.5, 0.01, "faces the seat's -Z (+X)")
+	assert_almost_eq(player.camera_rig.view_yaw(), -PI * 0.5, 0.01, "looks at the table")
+	await _frames(30)
+	assert_almost_eq(player.camera_rig.camera.global_position.y, FpTuning.SEATED_EYE_HEIGHT, 0.05, "seated eye height")
 	var stands: Array = []
 	player.stand_requested.connect(func() -> void: stands.append(true))
 	Input.action_press(&"move_forward")
@@ -251,6 +264,10 @@ func test_set_carried_follows_the_carrier_until_released() -> void:
 	assert_true(player.global_position.is_equal_approx(carrier.get_carry_point()), "at the carry point: %s" % player.global_position)
 	assert_almost_eq(player.facing, PI * 0.5, 0.01, "takes the carrier's yaw")
 	assert_eq(player.model.pose, &"carried")
+	assert_true(player.camera_rig.is_following(), "the view rides the shoulder")
+	assert_almost_eq(absf(angle_difference(player.camera_rig.view_yaw(), PI * 0.5 + PI)), 0.0, 0.01, "looking back over the guard's shoulder")
+	assert_lt(player.camera_rig.pitch, -0.3, "and down")
+	assert_true(player.hands.is_flailing(), "hands flail")
 	Input.action_press(&"move_forward")
 	await _frames(5)
 	Input.action_release(&"move_forward")
@@ -258,6 +275,8 @@ func test_set_carried_follows_the_carrier_until_released() -> void:
 	player.release(Vector3(6, 0, 0))
 	assert_eq(player.state, PlayerCharacter.STATE_FREE)
 	assert_eq(player.collision_layer, 2)
+	assert_false(player.camera_rig.is_following())
+	assert_false(player.hands.is_flailing())
 	assert_true(player.global_position.is_equal_approx(Vector3(6, 0, 0)))
 	await _frames(5)
 	assert_true(player.is_on_floor())
@@ -295,6 +314,7 @@ func test_set_hidden_removes_the_player_from_the_floor() -> void:
 	player.set_hidden(true)
 	assert_true(player.is_hidden())
 	assert_false(player.model.visible)
+	assert_false(player.hands.visible, "no hands while detained")
 	assert_eq(player.collision_layer, 0)
 	var start := player.global_position
 	await _hold(&"move_forward", 10)
@@ -316,12 +336,16 @@ func test_tumble_falls_and_gets_back_up() -> void:
 	assert_eq(player.model.pose, &"tumble")
 	var start := player.global_position
 	Input.action_press(&"move_forward")
-	await _frames(20)
+	await _frames(40)
 	assert_lt((player.global_position - start).length(), 0.01, "can't walk while knocked down")
+	assert_lt(player.camera_rig.camera.global_position.y, 1.0, "the view falls to the floor")
+	assert_gt(-player.camera_rig.camera.global_basis.z.y, 0.3, "looking up at the ceiling")
 	Input.action_release(&"move_forward")
 	await _frames(int(Tuning.CHARACTER_TUMBLE_SECONDS * 60.0) + 5)
 	assert_eq(player.action, PlayerCharacter.ACTION_NONE)
 	assert_ne(player.model.pose, &"tumble")
+	await _frames(30)
+	assert_gt(player.camera_rig.camera.global_position.y, 1.4, "back on its feet")
 
 
 # --- Interaction ----------------------------------------------------------------
@@ -419,6 +443,7 @@ func test_tackle_requested_for_a_guard_in_front() -> void:
 	assert_eq(tackles.size(), 0, "a guard behind is not tackled")
 	assert_eq(player.action, PlayerCharacter.ACTION_TACKLE, "whiffs anyway")
 	assert_eq(player.model.pose, &"tackle")
+	assert_eq(player.hands.current_anim(), &"shove", "both hands shove")
 	await _frames(int((Tuning.PLAYER_TACKLE_SECONDS + Tuning.PLAYER_DIVE_RECOVER_SECONDS) * 60.0) + 15)
 	assert_eq(player.action, PlayerCharacter.ACTION_NONE, "back on its feet")
 	behind.queue_free()
@@ -441,12 +466,15 @@ func test_dive_lunges_and_tackles_a_guard_in_reach() -> void:
 	assert_eq(player.action, PlayerCharacter.ACTION_DIVE)
 	assert_eq(player.model.pose, &"dive")
 	await _frames(20)
+	assert_lt(player.camera_rig.camera.global_position.y, 1.0, "the view dips to the floor")
 	assert_eq(tackles.size(), 1, "dove into the guard")
 	assert_eq(tackles[0], guard)
 	assert_lt(player.global_position.z, start.z - 1.5, "lunged forward")
 	await _frames(int(Tuning.PLAYER_DIVE_RECOVER_SECONDS * 60.0) + 30)
 	assert_eq(player.action, PlayerCharacter.ACTION_NONE, "got back up")
 	assert_eq(tackles.size(), 1, "once per dive")
+	await _frames(20)
+	assert_gt(player.camera_rig.camera.global_position.y, 1.4, "the view is back up")
 
 
 func test_running_into_a_guard_bumps_once_per_contact() -> void:
