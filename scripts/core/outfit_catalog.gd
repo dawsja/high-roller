@@ -10,6 +10,10 @@ extends RefCounted
 ## by each piece's tier; tier 0 (NONE and staff pieces) is not sold.
 ## Staff pieces come from staff lockers, not the gift shop, and are left out of
 ## pieces_for() unless asked for; random outfits never use them.
+## Locked pieces ("locked": true) are cosmetic unlocks (Unlocks, from lifetime
+## banked chips): the gift shop only sells one to a player who unlocked it
+## (pass their unlocked ids), and random outfits, patrons and laundry carts
+## never use them.
 
 const NONE := &"none"
 
@@ -50,7 +54,8 @@ const STAFF_PIECES := {
 	HR.OutfitSlot.ACCESSORY: &"staff_name_tag",
 }
 
-## id -> {slot, name, color, tier, staff}. Order within a slot is display order.
+## id -> {slot, name, color, tier, staff, locked (optional, default false)}.
+## Order within a slot is display order.
 const PIECES := {
 	# --- Hats ---
 	&"lucky_ball_cap": {"slot": HR.OutfitSlot.HAT, "name": "Lucky Ball Cap", "color": Color("d7263d"), "tier": 1, "staff": false},
@@ -61,6 +66,9 @@ const PIECES := {
 	&"poker_visor": {"slot": HR.OutfitSlot.HAT, "name": "Poker Visor", "color": Color("2ecc71"), "tier": 1, "staff": false},
 	&"pom_pom_beanie": {"slot": HR.OutfitSlot.HAT, "name": "Pom-Pom Beanie", "color": Color("8e44ad"), "tier": 1, "staff": false},
 	&"birthday_crown": {"slot": HR.OutfitSlot.HAT, "name": "Birthday Crown", "color": Color("f4c430"), "tier": 2, "staff": false},
+	&"propeller_beanie": {"slot": HR.OutfitSlot.HAT, "name": "Propeller Beanie", "color": Color("3fa9f5"), "tier": 1, "staff": false, "locked": true},
+	&"pirate_tricorn": {"slot": HR.OutfitSlot.HAT, "name": "Pirate Tricorn", "color": Color("5a3825"), "tier": 2, "staff": false, "locked": true},
+	&"viking_helmet": {"slot": HR.OutfitSlot.HAT, "name": "Viking Helmet", "color": Color("9aa3ad"), "tier": 3, "staff": false, "locked": true},
 	&"staff_hat": {"slot": HR.OutfitSlot.HAT, "name": "Staff Cap", "color": Color("7b1e3a"), "tier": 0, "staff": true},
 	# --- Glasses ---
 	&"aviator_shades": {"slot": HR.OutfitSlot.GLASSES, "name": "Aviator Shades", "color": Color("c9a227"), "tier": 2, "staff": false},
@@ -70,6 +78,9 @@ const PIECES := {
 	&"ski_goggles": {"slot": HR.OutfitSlot.GLASSES, "name": "Ski Goggles", "color": Color("ff8c1a"), "tier": 2, "staff": false},
 	&"star_glasses": {"slot": HR.OutfitSlot.GLASSES, "name": "Superstar Glasses", "color": Color("1e90ff"), "tier": 2, "staff": false},
 	&"groucho_disguise": {"slot": HR.OutfitSlot.GLASSES, "name": "Nose-and-Mustache Disguise", "color": Color("f1c27d"), "tier": 1, "staff": false},
+	&"retro_3d_glasses": {"slot": HR.OutfitSlot.GLASSES, "name": "Retro 3-D Glasses", "color": Color("f5f5f0"), "tier": 1, "staff": false, "locked": true},
+	&"eye_patch": {"slot": HR.OutfitSlot.GLASSES, "name": "Eye Patch", "color": Color("151515"), "tier": 2, "staff": false, "locked": true},
+	&"diamond_shades": {"slot": HR.OutfitSlot.GLASSES, "name": "Diamond Shades", "color": Color("7fe3ff"), "tier": 3, "staff": false, "locked": true},
 	# --- Tops ---
 	&"plain_tee": {"slot": HR.OutfitSlot.TOP, "name": "Plain White Tee", "color": Color("f2f2f2"), "tier": 1, "staff": false},
 	&"hawaiian_shirt": {"slot": HR.OutfitSlot.TOP, "name": "Hawaiian Shirt", "color": Color("ff7f50"), "tier": 1, "staff": false},
@@ -79,6 +90,9 @@ const PIECES := {
 	&"sequin_blazer": {"slot": HR.OutfitSlot.TOP, "name": "Sequin Blazer", "color": Color("e6c229"), "tier": 3, "staff": false},
 	&"lucky_sweater": {"slot": HR.OutfitSlot.TOP, "name": "Lucky Clover Sweater", "color": Color("2e8b57"), "tier": 1, "staff": false},
 	&"bowling_shirt": {"slot": HR.OutfitSlot.TOP, "name": "Bowling Shirt", "color": Color("1f6fb2"), "tier": 1, "staff": false},
+	&"polka_dot_shirt": {"slot": HR.OutfitSlot.TOP, "name": "Polka-Dot Shirt", "color": Color("e8457a"), "tier": 1, "staff": false, "locked": true},
+	&"trench_coat": {"slot": HR.OutfitSlot.TOP, "name": "Spy Trench Coat", "color": Color("b5925c"), "tier": 2, "staff": false, "locked": true},
+	&"gold_tuxedo": {"slot": HR.OutfitSlot.TOP, "name": "Gold Tuxedo", "color": Color("c98f0d"), "tier": 3, "staff": false, "locked": true},
 	&"staff_vest": {"slot": HR.OutfitSlot.TOP, "name": "Dealer Vest", "color": Color("7b1e3a"), "tier": 0, "staff": true},
 	# --- Bottoms ---
 	&"blue_jeans": {"slot": HR.OutfitSlot.BOTTOM, "name": "Blue Jeans", "color": Color("3b5998"), "tier": 1, "staff": false},
@@ -89,6 +103,9 @@ const PIECES := {
 	&"leopard_leggings": {"slot": HR.OutfitSlot.BOTTOM, "name": "Leopard Leggings", "color": Color("d9a441"), "tier": 2, "staff": false},
 	&"pleated_skirt": {"slot": HR.OutfitSlot.BOTTOM, "name": "Red Pleated Skirt", "color": Color("c0392b"), "tier": 2, "staff": false},
 	&"gold_lame_pants": {"slot": HR.OutfitSlot.BOTTOM, "name": "Gold Lame Disco Pants", "color": Color("ffd34d"), "tier": 3, "staff": false},
+	&"bell_bottoms": {"slot": HR.OutfitSlot.BOTTOM, "name": "Disco Bell-Bottoms", "color": Color("7ec8e3"), "tier": 1, "staff": false, "locked": true},
+	&"tartan_kilt": {"slot": HR.OutfitSlot.BOTTOM, "name": "Tartan Kilt", "color": Color("1f7a4d"), "tier": 2, "staff": false, "locked": true},
+	&"pinstripe_trousers": {"slot": HR.OutfitSlot.BOTTOM, "name": "Pinstripe Trousers", "color": Color("2c3e66"), "tier": 3, "staff": false, "locked": true},
 	&"staff_slacks": {"slot": HR.OutfitSlot.BOTTOM, "name": "Staff Slacks", "color": Color("15151a"), "tier": 0, "staff": true},
 	# --- Accessories ---
 	&"gold_chain": {"slot": HR.OutfitSlot.ACCESSORY, "name": "Chunky Gold Chain", "color": Color("d4a017"), "tier": 3, "staff": false},
@@ -98,6 +115,9 @@ const PIECES := {
 	&"fanny_pack": {"slot": HR.OutfitSlot.ACCESSORY, "name": "Neon Fanny Pack", "color": Color("7fff00"), "tier": 1, "staff": false},
 	&"tourist_camera": {"slot": HR.OutfitSlot.ACCESSORY, "name": "Tourist Camera", "color": Color("7f8c8d"), "tier": 2, "staff": false},
 	&"foam_finger": {"slot": HR.OutfitSlot.ACCESSORY, "name": "Big Foam Finger", "color": Color("2f80ed"), "tier": 1, "staff": false},
+	&"fuzzy_dice": {"slot": HR.OutfitSlot.ACCESSORY, "name": "Fuzzy Dice Necklace", "color": Color("f5f5f5"), "tier": 1, "staff": false, "locked": true},
+	&"shoulder_parrot": {"slot": HR.OutfitSlot.ACCESSORY, "name": "Shoulder Parrot", "color": Color("21c25e"), "tier": 2, "staff": false, "locked": true},
+	&"velvet_cape": {"slot": HR.OutfitSlot.ACCESSORY, "name": "Velvet Cape", "color": Color("5b1a8c"), "tier": 3, "staff": false, "locked": true},
 	&"staff_name_tag": {"slot": HR.OutfitSlot.ACCESSORY, "name": "Staff Name Tag", "color": Color("b08d57"), "tier": 0, "staff": true},
 }
 
@@ -142,8 +162,9 @@ static func slot_from_key(key: String) -> int:
 
 
 ## Catalog piece ids for a slot, in display order. Optional slots start with
-## NONE. Staff pieces are included only when include_staff is true.
-static func pieces_for(slot: int, include_staff: bool = false) -> Array[StringName]:
+## NONE. Civilian pieces only (what random outfits and laundry carts draw
+## from) unless include_all: then staff and locked pieces too (every piece).
+static func pieces_for(slot: int, include_all: bool = false) -> Array[StringName]:
 	var ids: Array[StringName] = []
 	if not is_valid_slot(slot):
 		return ids
@@ -153,19 +174,46 @@ static func pieces_for(slot: int, include_staff: bool = false) -> Array[StringNa
 		var data: Dictionary = PIECES[id]
 		if int(data["slot"]) != slot:
 			continue
-		if bool(data["staff"]) and not include_staff:
+		if (bool(data["staff"]) or bool(data.get("locked", false))) and not include_all:
 			continue
 		ids.append(id)
 	return ids
 
 
-## Pieces the gift shop sells in a slot: everything with a price (no NONE, no staff).
-static func shop_pieces(slot: int) -> Array[StringName]:
+## Pieces the gift shop sells in a slot: everything with a price (no NONE, no
+## staff), locked pieces only when they are in `unlocked` (a player's unlocked
+## ids). include_locked lists every locked piece too (to show them greyed out).
+static func shop_pieces(slot: int, unlocked: Array = [], include_locked: bool = false) -> Array[StringName]:
 	var ids: Array[StringName] = []
-	for id: StringName in pieces_for(slot):
-		if piece_price(id) > 0:
+	for id: StringName in pieces_for(slot, true):
+		if piece_price(id) <= 0 or is_staff_piece(id):
+			continue
+		if include_locked or not is_locked(id, unlocked):
 			ids.append(id)
 	return ids
+
+
+## Every locked (unlockable) piece, in catalog order.
+static func locked_pieces() -> Array[StringName]:
+	var ids: Array[StringName] = []
+	for id: StringName in PIECES:
+		if is_unlockable(id):
+			ids.append(id)
+	return ids
+
+
+## True for a catalog piece that starts locked (a cosmetic unlock).
+static func is_unlockable(id: StringName) -> bool:
+	if not PIECES.has(id):
+		return false
+	var data: Dictionary = PIECES[id]
+	return bool(data.get("locked", false))
+
+
+## True for a locked piece that isn't in `unlocked` (piece ids as StringName
+## or String).
+static func is_locked(id: StringName, unlocked: Array = []) -> bool:
+	return is_unlockable(id) and not unlocked.has(id) and not unlocked.has(String(id))
 
 
 ## True if the id is NONE or a catalog piece.
@@ -236,8 +284,9 @@ static func piece_price(id: StringName) -> int:
 	return int(Tuning.OUTFIT_TIER_PRICES[tier])
 
 
-static func is_for_sale(id: StringName) -> bool:
-	return piece_price(id) > 0
+## Has a price and isn't locked for a player with these unlocked ids.
+static func is_for_sale(id: StringName, unlocked: Array = []) -> bool:
+	return piece_price(id) > 0 and not is_locked(id, unlocked)
 
 
 ## What a fresh outfit wears in a slot.
@@ -246,7 +295,7 @@ static func default_piece(slot: int) -> StringName:
 
 
 ## A random civilian piece for the slot (NONE possible in optional slots).
-## Never a staff piece. `exclude` is skipped when there is another choice.
+## Never a staff or locked piece. `exclude` is skipped when there is another choice.
 static func random_piece(slot: int, rng: RandomNumberGenerator, exclude: StringName = &"") -> StringName:
 	var ids: Array[StringName] = pieces_for(slot)
 	if ids.is_empty():
@@ -257,7 +306,7 @@ static func random_piece(slot: int, rng: RandomNumberGenerator, exclude: StringN
 
 
 ## A random civilian look for patrons and new players. Never a staff uniform
-## (it never uses staff pieces at all).
+## (it never uses staff pieces at all) and never a locked piece.
 static func random_outfit(rng: RandomNumberGenerator) -> Outfit:
 	var outfit := Outfit.new()
 	for slot: int in all_slots():

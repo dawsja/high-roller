@@ -458,7 +458,7 @@ func test_reason_constants_are_distinct_string_names() -> void:
 		HeatRules.AREA_CHANGE, HeatRules.OFF_TABLE, HeatRules.SLOT_BLEND, HeatRules.FLOOR_DECAY,
 		HeatRules.CHANGE_OUTFIT, HeatRules.RUN_IN_VIEW, HeatRules.TABLE_JUMP, HeatRules.BUMP_GUARD,
 		HeatRules.KNOCK_OVER, HeatRules.POSTER_MATCH, HeatRules.CASH_OUT, HeatRules.CAMERA,
-		HeatRules.TACKLE, HeatRules.SHARED_ROLL,
+		HeatRules.TACKLE, HeatRules.SHARED_ROLL, HeatRules.LOITERING,
 	]
 	var seen := {}
 	for r in contract:
@@ -636,6 +636,16 @@ func test_passive_slot_blend() -> void:
 	assert_almost_eq(HeatRules.passive_rate(ctx), Tuning.SLOT_BLEND_HEAT_PER_SECOND, EPS, "slots never camp")
 
 
+func test_slot_blend_pauses_after_a_win() -> void:
+	var ctx := {"seated_game": HR.GameType.SLOTS, "seconds_since_win": 0.0}
+	assert_true(HeatRules.passive_rates(ctx).is_empty(), "a machine paying out draws eyes")
+	ctx["seconds_since_win"] = Tuning.SLOT_BLEND_WIN_PAUSE_SECONDS - 0.01
+	assert_true(HeatRules.passive_rates(ctx).is_empty())
+	ctx["seconds_since_win"] = Tuning.SLOT_BLEND_WIN_PAUSE_SECONDS
+	assert_eq(HeatRules.passive_rates(ctx).keys(), [HeatRules.SLOT_BLEND])
+	assert_eq(HeatRules.passive_rates({"seated_game": HR.GameType.ROULETTE, "seconds_since_win": 0.0}).size(), 0, "other games never blend anyway")
+
+
 func test_passive_seated_within_grace_is_zero() -> void:
 	for game: int in Tuning.GAMES:
 		if game == HR.GameType.SLOTS:
@@ -680,6 +690,45 @@ func test_passive_accepts_string_name_and_float_keys() -> void:
 	bar.pit_boss_view = true
 	assert_almost_eq(HeatRules.passive_rate(bar), Tuning.OFF_TABLE_HEAT_PER_SECOND)
 	assert_eq(HeatRules.gain_multiplier(bar), Tuning.PIT_BOSS_HEAT_MULT)
+
+
+func test_passive_loitering_replaces_the_cool_down() -> void:
+	var idle := Tuning.LOITER_GRACE_SECONDS + 0.01
+	assert_false(HeatRules.is_loitering(Tuning.LOITER_GRACE_SECONDS), "the grace itself is fine")
+	assert_true(HeatRules.is_loitering(idle))
+	for zone: int in [HR.ZoneType.FLOOR, HR.ZoneType.BAR, HR.ZoneType.RESTROOM, HR.ZoneType.CASHIER]:
+		var ctx := {"zone": zone, "loiter_seconds": idle}
+		assert_eq(HeatRules.passive_rates(ctx).keys(), [HeatRules.LOITERING], "zone %d" % zone)
+		assert_almost_eq(HeatRules.passive_rate(ctx), Tuning.LOITER_HEAT_PER_SECOND, EPS)
+		ctx["loiter_seconds"] = Tuning.LOITER_GRACE_SECONDS
+		assert_false(HeatRules.passive_rates(ctx).has(HeatRules.LOITERING), "within the grace: zone %d" % zone)
+	var slots := {"seated_game": HR.GameType.SLOTS, "loiter_seconds": idle}
+	assert_eq(HeatRules.passive_rates(slots).keys(), [HeatRules.LOITERING], "sitting at a slot without playing doesn't blend in")
+	var table := {"seated_game": HR.GameType.BLACKJACK, "seconds_at_table": 100.0, "loiter_seconds": idle}
+	assert_eq(HeatRules.passive_rates(table).keys(), [HeatRules.CAMPING], "camping already covers an idle table seat")
+	var running := {"loiter_seconds": idle, "running_in_view": true}
+	assert_almost_eq(HeatRules.passive_rate(running), Tuning.LOITER_HEAT_PER_SECOND + Tuning.RUN_IN_VIEW_HEAT_PER_SECOND, EPS)
+	assert_gt(Tuning.LOITER_HEAT_PER_SECOND, 0.0)
+
+
+func test_passive_reasons_cover_every_passive_rate() -> void:
+	var ctxs := [
+		{}, {"zone": HR.ZoneType.BAR}, {"seated_game": HR.GameType.SLOTS},
+		{"seated_game": HR.GameType.DICE, "seconds_at_table": 100.0},
+		{"loiter_seconds": 1000.0, "running_in_view": true, "in_camera_view": true},
+	]
+	for ctx: Dictionary in ctxs:
+		for reason: StringName in HeatRules.passive_rates(ctx):
+			assert_true(HeatRules.is_passive(reason), str(reason))
+	assert_false(HeatRules.is_passive(HeatRules.WIN))
+	assert_false(HeatRules.is_passive(HeatRules.TABLE_JUMP))
+
+
+func test_table_play_reasons() -> void:
+	for r: StringName in [HeatRules.WIN, HeatRules.STREAK, HeatRules.SHARED_ROLL, HeatRules.CAMPING]:
+		assert_true(HeatRules.is_table_play(r), str(r))
+	for r: StringName in [HeatRules.TABLE_JUMP, HeatRules.CAMERA, HeatRules.POSTER_MATCH, HeatRules.RUN_IN_VIEW, HeatRules.BUMP_GUARD, HeatRules.LOITERING, &""]:
+		assert_false(HeatRules.is_table_play(r), str(r))
 
 
 func test_passive_running_in_view() -> void:

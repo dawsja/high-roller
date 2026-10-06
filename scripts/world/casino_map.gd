@@ -17,6 +17,17 @@ extends Node3D
 ## The navmesh was (re)baked.
 signal navigation_baked()
 
+## Area signs (fade_signs) are fully shown between these flat distances from
+## the viewing camera and fade out to nothing at the outer ones.
+const SIGN_NEAR_HIDDEN := 1.0
+const SIGN_NEAR_SHOWN := 2.5
+const SIGN_FAR_SHOWN := 12.0
+const SIGN_FAR_HIDDEN := 16.0
+## A sign whose top would show in this top share of the screen (the HUD's
+## band) fades out; fully gone SIGN_BAND_FADE higher.
+const SIGN_HUD_BAND := 0.25
+const SIGN_BAND_FADE := 0.04
+
 var nav_region: NavigationRegion3D
 ## Parent for extra static props that should be carved out of the navmesh.
 var props_root: Node3D
@@ -46,6 +57,9 @@ var slot_seats: Array[Transform3D] = []
 ## &"parking_garage" | &"restroom" | &"loading_dock" -> Vector3 (Forger.LOCATIONS).
 var forger_points: Dictionary = {}
 var poster_boards: Array[PosterBoardNode] = []
+## Billboard signs over the game areas ("PIT A", "SLOTS"); faded every frame
+## for the viewing camera (fade_signs).
+var area_signs: Array[Label3D] = []
 
 ## The Tuning.CASINOS row this map was built for, and its size class.
 var casino: Dictionary = {}
@@ -60,6 +74,42 @@ var _players: Dictionary = {}
 var _dirty: Dictionary = {}
 var _serial: int = 0
 var _flush_queued: bool = false
+
+
+func _process(_delta: float) -> void:
+	if area_signs.is_empty() or not is_inside_tree():
+		return
+	var cam := get_viewport().get_camera_3d()
+	if cam != null:
+		fade_signs(cam)
+
+
+## Fades every area sign for `cam`: by flat distance (sign_distance_alpha), and
+## out of the screen's top band, where the HUD sits, so far-off signs never
+## float over it.
+func fade_signs(cam: Camera3D) -> void:
+	var height: float = cam.get_viewport().get_visible_rect().size.y if cam.is_inside_tree() else 0.0
+	for area_sign: Label3D in area_signs:
+		if not is_instance_valid(area_sign) or not area_sign.is_inside_tree():
+			continue
+		var alpha := sign_distance_alpha(Perception.flat_distance(cam.global_position, area_sign.global_position))
+		if alpha > 0.0 and height > 0.0:
+			var top := area_sign.global_position + Vector3.UP * float(area_sign.font_size) * area_sign.pixel_size * 0.5
+			if cam.is_position_behind(top):
+				alpha = 0.0
+			else:
+				var y: float = cam.unproject_position(top).y / height
+				alpha = minf(alpha, clampf((y - SIGN_HUD_BAND + SIGN_BAND_FADE) / SIGN_BAND_FADE, 0.0, 1.0))
+		area_sign.modulate.a = alpha
+		area_sign.outline_modulate.a = alpha
+		area_sign.visible = alpha > 0.01
+
+
+## 0..1: how much of an area sign shows `distance` metres (flat) from the camera.
+static func sign_distance_alpha(distance: float) -> float:
+	if distance < SIGN_NEAR_SHOWN:
+		return clampf((distance - SIGN_NEAR_HIDDEN) / (SIGN_NEAR_SHOWN - SIGN_NEAR_HIDDEN), 0.0, 1.0)
+	return clampf((SIGN_FAR_HIDDEN - distance) / (SIGN_FAR_HIDDEN - SIGN_FAR_SHOWN), 0.0, 1.0)
 
 
 ## Adds a zone and lets this map decide which zone a player counts as in.

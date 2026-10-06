@@ -3,8 +3,10 @@ extends Control
 ## The in-game heads-up display (full screen, never takes the mouse): the Heat
 ## meter, pocket chips, crew bank and climb progress, strikes, casino and rung,
 ## visit clock (score at The Apex), the fake ID in use, the worn outfit, the
-## interact prompt, a notification feed, a big center banner and a status line
-## while carried, detained or on the curb.
+## interact prompt, a notification feed, a big center banner, a status line
+## while carried, detained or on the curb, a note under the Heat meter
+## (loitering, the after-rejoin grace), and (co-op) the crew: each teammate's
+## name, Heat level and status.
 ##
 ## Reads host.snapshot() every Tuning.UI_REFRESH_SECONDS and reacts to
 ## host.sim_event right away. It never sends requests.
@@ -54,6 +56,7 @@ const _REFRESH_KINDS: Array[StringName] = [
 	&"status", &"seated", &"stood", &"zone", &"outfit", &"id", &"banked", &"withdrawn", &"strike",
 	&"rejoined", &"curb", &"detained", &"caught", &"freed", &"fire_alarm", &"poster",
 	&"poster_removed", &"poster_defaced", &"look_recorded", &"player_joined", &"climbed", &"thrown_out",
+	&"player_left",
 ]
 const _BANNER_IN_SECONDS := 0.22
 const _BANNER_OUT_SECONDS := 0.45
@@ -67,6 +70,8 @@ var heat_bar: HeatBar
 var heat_level_label: Label
 var heat_value_label: Label
 var heat_popup_label: Label
+## Under the Heat bar: loitering, or the after-rejoin grace countdown ("" hides it).
+var heat_note_label: Label
 var casino_label: Label
 var rung_label: Label
 var clock_label: Label
@@ -94,6 +99,9 @@ var prompt_label: Label
 var status_label: Label
 var feed: VBoxContainer
 var banner_label: Label
+## Co-op teammates (hidden solo): one row per teammate.
+var crew_panel: PanelContainer
+var crew_box: VBoxContainer
 
 var _snap: Dictionary = {}
 var _heat: float = 0.0
@@ -109,6 +117,7 @@ var _heat_holder: Control
 var _outfit_key: String = ""
 var _pocket_flash_left: float = 0.0
 var _pocket_flash_color: Color = UiTheme.CREAM
+var _loitering: bool = false
 
 
 func _init() -> void:
@@ -201,11 +210,13 @@ func refresh() -> void:
 		_level = int(me.get("level", HeatMeter.level_for(_heat)))
 		_status = int(me.get("status", HR.PlayerStatus.FREE))
 	_render_heat()
+	_render_heat_note(me)
 	_render_casino(run)
 	_render_chips(me, run)
 	_render_id(me)
 	_render_outfit(me)
 	_render_status(me)
+	_render_crew(players)
 
 
 func heat_value() -> float:
@@ -335,9 +346,19 @@ func _on_sim_event(kind: StringName, data: Dictionary) -> void:
 				push_notification(str(data.get("text", "")), UiTheme.LOSS_COLOR if k == &"flagged" or k == &"broke" else UiTheme.GOLD_LIGHT)
 		&"rejoined":
 			if mine:
-				push_notification("Back in the casino. Keep your head down.", UiTheme.WIN_COLOR)
+				var grace: float = float(data.get("grace", 0.0))
+				if grace > 0.0:
+					push_notification("Back at the entrance. Guards leave you alone for %d s: lie low." % ceili(grace), UiTheme.WIN_COLOR)
+				else:
+					push_notification("Back in the casino. Keep your head down.", UiTheme.WIN_COLOR)
 		&"curb":
 			push_notification("Tossed on the curb for %d s." % int(data.get("seconds", 0.0)), UiTheme.LOSS_COLOR)
+		&"chips_given":
+			if int(data.get("to", 0)) == pid:
+				push_notification("%s handed you %s chips." % [_name_of(int(data.get("from", 0))), UiTheme.chips(int(data.get("amount", 0)))], UiTheme.WIN_COLOR)
+		&"player_left":
+			if not mine:
+				push_notification("%s left the crew." % _name_of(who), UiTheme.MUTED)
 	if _REFRESH_KINDS.has(kind):
 		refresh()
 
@@ -348,7 +369,7 @@ func _on_heat(data: Dictionary) -> void:
 	var delta: float = float(data.get("delta", 0.0))
 	var reason: StringName = StringName(str(data.get("reason", "")))
 	_render_heat()
-	if UiTheme.is_passive_heat(reason) or reason == HeatRules.RESET or absf(delta) < Tuning.UI_HEAT_POPUP_MIN:
+	if HeatRules.is_passive(reason) or reason == HeatRules.RESET or absf(delta) < Tuning.UI_HEAT_POPUP_MIN:
 		return
 	heat_popup_label.text = "%s Heat  %s" % [UiTheme.signed(delta), String(reason).replace("_", " ")]
 	heat_popup_label.add_theme_color_override(&"font_color", UiTheme.LOSS_COLOR if delta > 0.0 else UiTheme.WIN_COLOR)
@@ -364,7 +385,7 @@ func _on_level(old_level: int, new_level: int) -> void:
 	if new_level > old_level:
 		match new_level:
 			HR.HeatLevel.WATCHED:
-				push_notification("You're being WATCHED. Cameras follow you.", color)
+				push_notification(watched_text(), color)
 			HR.HeatLevel.SUSPECTED:
 				show_banner(lname, color)
 				push_notification("SUSPECTED: a guard is coming to check your ID.", color)
@@ -373,6 +394,39 @@ func _on_level(old_level: int, new_level: int) -> void:
 				push_notification("WANTED: guards are chasing you. Run, hide, change!", color)
 	else:
 		push_notification("Cooling off: %s." % UiTheme.level_name(new_level), color)
+
+
+## The Watched warning in this casino's words: "cameras follow you" only
+## where the casino has cameras (never in practice, which has none).
+func watched_text() -> String:
+	var run: Dictionary = host.snapshot().get("run", {}) if host != null else {}
+	var practice: bool = host != null and bool(host.visit_info().get("practice", false))
+	if bool(run.get("has_cameras", false)) and not practice:
+		return "You're being WATCHED. Cameras follow you."
+	return "You're being WATCHED. Security is keeping an eye on you."
+
+
+## True when climbing now would be refused with FloorSim.NO_STAKE: after the
+## buy-in no pocket and not the bank could cover a bet up there (a stretch
+## falls back to one rung first). `run` and `players` are snapshot parts.
+static func climb_would_arrive_broke(run: Dictionary, players: Dictionary) -> bool:
+	if not bool(run.get("can_climb", false)):
+		return false
+	var rung: int = int(run.get("rung", Tuning.TOP_RUNG))
+	var target: int = int(run.get("climb_target", rung))
+	if target >= rung or not _arrives_broke(run, players, rung, target):
+		return false
+	return target != rung - 2 or _arrives_broke(run, players, rung, rung - 1)
+
+
+static func _arrives_broke(run: Dictionary, players: Dictionary, rung: int, target: int) -> bool:
+	var min_bet: int = int(CasinoLadder.casino(target).get("min_bet", 1))
+	if int(run.get("bank", 0)) - CasinoLadder.climb_cost(rung, target) >= min_bet:
+		return false
+	for key: Variant in players:
+		if int((players[key] as Dictionary).get("pocket", 0)) >= min_bet:
+			return false
+	return true
 
 
 func _on_id(data: Dictionary) -> void:
@@ -409,6 +463,26 @@ func _render_heat() -> void:
 	heat_level_label.add_theme_color_override(&"font_color", color)
 	heat_value_label.text = str(int(floorf(_heat)))
 	heat_value_label.add_theme_color_override(&"font_color", color)
+
+
+func _render_heat_note(me: Dictionary) -> void:
+	var text := ""
+	var color := UiTheme.MUTED
+	var on_floor: bool = _status == HR.PlayerStatus.FREE or _status == HR.PlayerStatus.SEATED
+	var loitering: bool = on_floor and bool(me.get("loitering", false))
+	var grace: float = float(me.get("rejoin_grace", 0.0))
+	if on_floor and grace > 0.0:
+		text = "FRESH START  -  guards leave you alone %d s" % ceili(grace)
+		color = UiTheme.WIN_COLOR
+	elif loitering:
+		text = "LOITERING  -  play or move on"
+		color = UiTheme.heat_color(HR.HeatLevel.SUSPECTED)
+	if loitering and not _loitering:
+		push_notification("Play or move on: security notices loiterers.", UiTheme.heat_color(HR.HeatLevel.SUSPECTED))
+	_loitering = loitering
+	heat_note_label.text = text
+	heat_note_label.add_theme_color_override(&"font_color", color)
+	heat_note_label.visible = text != ""
 
 
 func _render_casino(run: Dictionary) -> void:
@@ -464,7 +538,10 @@ func _render_chips(me: Dictionary, run: Dictionary) -> void:
 	bank_bar.max_value = maxf(1.0, float(buy_in))
 	bank_bar.value = minf(float(bank), float(buy_in))
 	var above: String = str(CasinoLadder.casino(rung - 1).get("name", "the next casino"))
-	if bool(run.get("can_climb", false)):
+	if climb_would_arrive_broke(run, _snap.get("players", {})):
+		bank_hint_label.text = "Keep %s chips to bet upstairs!" % UiTheme.chips(int(run.get("climb_stake", 0)))
+		bank_hint_label.add_theme_color_override(&"font_color", UiTheme.heat_color(HR.HeatLevel.SUSPECTED))
+	elif bool(run.get("can_climb", false)):
 		bank_hint_label.text = "CLIMB READY! Crew to the exit."
 		bank_hint_label.add_theme_color_override(&"font_color", UiTheme.WIN_COLOR)
 	else:
@@ -548,6 +625,41 @@ func _render_status(me: Dictionary) -> void:
 	status_label.visible = text != ""
 
 
+## Teammates' rows: name, Heat level (in its color) and what they're up to.
+func _render_crew(players: Dictionary) -> void:
+	UiTheme.clear_children(crew_box)
+	var any := false
+	for key: Variant in players:
+		var other: int = int(key)
+		if other == pid:
+			continue
+		any = true
+		var p: Dictionary = players[key]
+		var level: int = int(p.get("level", HeatMeter.level_for(float(p.get("heat", 0.0)))))
+		var row := HBoxContainer.new()
+		row.add_theme_constant_override(&"separation", 8)
+		crew_box.add_child(row)
+		var dot := Panel.new()
+		dot.custom_minimum_size = Vector2(18, 18)
+		dot.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		dot.add_theme_stylebox_override(&"panel", UiTheme.flat_box(UiTheme.heat_color(level), UiTheme.CREAM, 2, 9, 0))
+		row.add_child(dot)
+		var n := UiTheme.make_label(str(p.get("name", "Player %d" % other)), &"", UiTheme.FONT_BODY - 2)
+		n.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		row.add_child(n)
+		row.add_child(UiTheme.make_label(UiTheme.level_name(level).to_upper(), &"SmallLabel", 16, UiTheme.heat_color(level)))
+		var status: int = int(p.get("status", HR.PlayerStatus.FREE))
+		var text: String = UiTheme.status_name(status)
+		if status == HR.PlayerStatus.FREE and int(p.get("zone", -1)) == HR.ZoneType.EXIT:
+			text = "At the exit"
+		var s := UiTheme.make_label(text, &"SmallLabel", 16, UiTheme.LOSS_COLOR if status in [HR.PlayerStatus.CARRIED, HR.PlayerStatus.DETAINED] else UiTheme.CREAM)
+		s.custom_minimum_size = Vector2(92, 0)
+		s.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		row.add_child(s)
+	crew_panel.visible = any
+	UiTheme.ignore_mouse(crew_panel)
+
+
 # --- Animation ----------------------------------------------------------------
 
 func _animate_heat(delta: float) -> void:
@@ -629,6 +741,10 @@ func _build() -> void:
 	var spacer := Control.new()
 	spacer.custom_minimum_size = Vector2(0, 14)
 	hv.add_child(spacer)
+	heat_note_label = UiTheme.make_label("", &"SmallLabel", 18)
+	heat_note_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	heat_note_label.visible = false
+	hv.add_child(heat_note_label)
 
 	# Top left: casino, rung, clock or score, strikes.
 	var casino := UiTheme.make_panel(&"HudPanel")
@@ -660,6 +776,20 @@ func _build() -> void:
 		icon.add_child(x)
 		strikes_row.add_child(icon)
 		strike_icons.append(icon)
+
+	# Left, under the casino: the crew (co-op).
+	crew_panel = UiTheme.make_panel(&"HudPanel")
+	crew_panel.position = Vector2(16, 190)
+	crew_panel.custom_minimum_size = Vector2(340, 0)
+	crew_panel.visible = false
+	add_child(crew_panel)
+	var crew_v := VBoxContainer.new()
+	crew_v.add_theme_constant_override(&"separation", 2)
+	crew_panel.add_child(crew_v)
+	crew_v.add_child(UiTheme.make_label("CREW", &"SmallLabel"))
+	crew_box = VBoxContainer.new()
+	crew_box.add_theme_constant_override(&"separation", 2)
+	crew_v.add_child(crew_box)
 
 	# Top right: pocket and crew bank.
 	var money := UiTheme.make_panel(&"HudPanel")

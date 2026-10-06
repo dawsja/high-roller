@@ -7,7 +7,7 @@ extends RefCounted
 const ACTIONS: Array[StringName] = [
 	&"move_forward", &"move_back", &"move_left", &"move_right",
 	&"run", &"jump", &"dive", &"interact", &"tackle", &"throw_chips", &"knock_over",
-	&"pause", &"toggle_debug", &"ui_quiz_1", &"ui_quiz_2", &"ui_quiz_3",
+	&"give_chips", &"emote", &"pause", &"toggle_debug", &"ui_quiz_1", &"ui_quiz_2", &"ui_quiz_3",
 ]
 
 const MOVE_ACTIONS: Array[StringName] = [&"move_forward", &"move_back", &"move_left", &"move_right"]
@@ -27,8 +27,9 @@ static func ensure_actions() -> void:
 ## Default bindings: action -> Array of fresh InputEvents. Keyboard keys are
 ## physical (layout independent); gamepad events match any controller.
 ## Gamepad: left stick moves, A jump, B dive, X interact, Y throw chips,
-## LB / left stick click run, RB tackle, RT knock over, Start pause,
-## Back debug, d-pad left/up/right answer the ID quiz.
+## LB / left stick click run, RB tackle, RT knock over, d-pad down hands
+## chips to the nearest teammate, right stick click emotes, Start pause, Back
+## debug, d-pad left/up/right answer the ID quiz.
 static func bindings() -> Dictionary:
 	return {
 		&"move_forward": [_key(KEY_W), _key(KEY_UP), _axis(JOY_AXIS_LEFT_Y, -1.0)],
@@ -42,6 +43,8 @@ static func bindings() -> Dictionary:
 		&"tackle": [_key(KEY_F), _button(JOY_BUTTON_RIGHT_SHOULDER)],
 		&"throw_chips": [_key(KEY_G), _button(JOY_BUTTON_Y)],
 		&"knock_over": [_key(KEY_Q), _axis(JOY_AXIS_TRIGGER_RIGHT, 1.0)],
+		&"give_chips": [_key(KEY_H), _button(JOY_BUTTON_DPAD_DOWN)],
+		&"emote": [_key(KEY_T), _button(JOY_BUTTON_RIGHT_STICK)],
 		&"pause": [_key(KEY_ESCAPE), _button(JOY_BUTTON_START)],
 		&"toggle_debug": [_key(KEY_F3), _button(JOY_BUTTON_BACK)],
 		&"ui_quiz_1": [_key(KEY_1), _key(KEY_KP_1), _button(JOY_BUTTON_DPAD_LEFT)],

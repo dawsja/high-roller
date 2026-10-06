@@ -12,6 +12,15 @@ extends CharacterBody3D
 ## icon only show once it chases), PIT_BOSS (stays within PIT_BOSS_POST_RADIUS
 ## of its post, never asks for ID or grabs; it watches, drives pit_boss_view
 ## through sees_pid() and radios Suspected+ players).
+##
+## A failed ID check: the brain's `shout` action emits shouted() and the guard
+## stands facing the player with a pulsing "HEY!" over its head while
+## is_reacting(), then gives chase.
+##
+## Co-op: guards think only on the host. enable_net_sync() publishes the
+## host's position, facing, state, pose, carried pid, cone tint and icon; on a
+## client the guard is a `puppet` (no brain, perception or navigation) that
+## eases toward those values.
 
 ## Each physics frame a player is in view.
 signal saw_player(guard: GuardNPC, pid: int, running: bool)
@@ -26,6 +35,9 @@ signal released(guard: GuardNPC, pid: int)
 signal state_changed(guard: GuardNPC, old_state: int, new_state: int)
 ## Pit boss only: a Suspected+ player at `position` (per player at most every PIT_BOSS_RADIO_COOLDOWN).
 signal radioed(guard: GuardNPC, pid: int, position: Vector3)
+## `pid` failed an ID check: the guard barks "HEY!" and stands shouting for
+## ID_FAIL_REACTION_SECONDS before it runs (the player's head start).
+signal shouted(guard: GuardNPC, pid: int)
 
 const GROUP := &"guards"
 ## Layer 3 (guard); collides with world, players and patrons.
@@ -36,6 +48,16 @@ const WORLD_MASK := 1
 const PATH_HEIGHT_RESYNC_SECONDS := 1.0
 ## A pit boss shows "!" this long after a radio call.
 const RADIO_ICON_SECONDS := 1.0
+## The bark over the head while a failed check's reaction lasts.
+const SHOUT_TEXT := "HEY!"
+const SHOUT_COLOR := Color(1.0, 0.15, 0.1)
+## The bark pulses this much bigger, this fast (cycles per second).
+const SHOUT_PULSE := 0.3
+const SHOUT_PULSE_HZ := 3.0
+## Seconds between position syncs to the clients.
+const NET_SYNC_INTERVAL := 1.0 / 30.0
+const PUPPET_SNAP_DISTANCE := 4.0
+const PUPPET_SHARPNESS := 16.0
 
 const CONE_GREEN := Color(0.3, 0.95, 0.4, 0.18)
 const CONE_YELLOW := Color(1.0, 0.86, 0.2, 0.2)
@@ -70,6 +92,18 @@ var facing: float = 0.0
 var fire_alarm: bool = false
 ## The intent the brain returned last frame (debug).
 var last_intent: Dictionary = {}
+## Co-op client copy: follows the host's net_* values (set before setup()).
+var puppet: bool = false
+# Synced from the host (see enable_net_sync()).
+var net_position: Vector3 = Vector3.ZERO
+var net_facing: float = 0.0
+var net_state: int = HR.GuardState.PATROL
+var net_pose: StringName = &"idle"
+var net_carrying: int = -1
+var net_cone_color: Color = CONE_GREEN
+var net_cone_visible: bool = true
+var net_icon: String = ""
+var net_icon_color: Color = Color.WHITE
 
 var _players_provider: Callable
 var _shape: CollisionShape3D
@@ -97,6 +131,7 @@ var _cone_timer := 0.0
 var _look_base := 0.0
 var _height_synced := false
 var _height_timer := 0.0
+var _net_sync := false
 
 
 func _init() -> void:
@@ -145,7 +180,7 @@ func _init() -> void:
 
 ## `patrol` is the looped route (a pit boss uses patrol[0] as its post).
 ## `players_provider.call()` returns an Array of {pid, node: Node3D, heat,
-## matches_poster, staff_uniform, available}.
+## matches_poster, staff_uniform, available, cleared}.
 func setup(id: int, guard_type: int, patrol: Array[Vector3], back_room_point: Vector3, players_provider: Callable) -> void:
 	guard_id = id
 	security_type = guard_type
@@ -161,8 +196,20 @@ func setup(id: int, guard_type: int, patrol: Array[Vector3], back_room_point: Ve
 	brain = GuardBrain.new(points, security_type, back_room)
 	brain.state_changed.connect(_on_brain_state_changed)
 	_look_base = facing
+	if puppet:
+		nav_agent.avoidance_enabled = false
+		net_position = _current_position()
+		net_facing = facing
 	_dress()
 	_update_visuals(0.0)
+
+
+## Adds the MultiplayerSynchronizer for net_* (the host sends, a client's
+## puppet applies; both sides need it).
+func enable_net_sync() -> void:
+	_net_sync = true
+	_publish()
+	NetSync.attach(self, [&"net_position", &"net_facing"], [&"net_state", &"net_pose", &"net_carrying", &"net_cone_color", &"net_cone_visible", &"net_icon", &"net_icon_color"], NET_SYNC_INTERVAL)
 
 
 # --- Public API ---------------------------------------------------------------
@@ -222,7 +269,7 @@ func get_carry_point() -> Vector3:
 
 ## pid being carried, or −1.
 func carrying_pid() -> int:
-	return _carrying
+	return net_carrying if puppet else _carrying
 
 
 ## True if `pid` was in view this frame (a pit boss's view sets pit_boss_view).
@@ -244,9 +291,14 @@ func last_seen_position(pid: int) -> Variant:
 	return (entry as Dictionary)["position"] if entry is Dictionary else null
 
 
-## HR.GuardState of the brain.
+## HR.GuardState of the brain (the host's, on a puppet).
 func get_state() -> int:
-	return brain.state
+	return net_state if puppet else brain.state
+
+
+## Standing and shouting after a failed ID check (it can't grab yet).
+func is_reacting() -> bool:
+	return net_icon == SHOUT_TEXT if puppet else brain.is_reacting()
 
 
 ## Speed multiplier from struggling (1 = full speed).
@@ -273,6 +325,9 @@ func face_toward(point: Vector3) -> void:
 # --- Frame update -------------------------------------------------------------
 
 func _physics_process(delta: float) -> void:
+	if puppet:
+		_physics_puppet(delta)
+		return
 	if _avoid_pending:
 		# The avoidance callback never came (no navigation map): move directly.
 		_avoid_pending = false
@@ -304,6 +359,46 @@ func _physics_process(delta: float) -> void:
 	_do_action(intent.get("action", GuardBrain.ACT_NONE))
 	_move(intent, delta)
 	_update_visuals(delta)
+	if _net_sync:
+		_publish()
+
+
+func _publish() -> void:
+	net_position = _current_position()
+	net_facing = facing
+	net_state = brain.state
+	net_pose = model.pose
+	net_carrying = _carrying
+	net_cone_color = _cone_color(brain.state)
+	net_cone_visible = vision_cone.visible
+	net_icon = icon.text if icon.visible else ""
+	net_icon_color = icon.modulate
+
+
+## A client's copy: ease toward the host's position and copy what it shows.
+func _physics_puppet(delta: float) -> void:
+	var k: float = 1.0 - exp(-PUPPET_SHARPNESS * delta)
+	var before := global_position
+	if global_position.distance_to(net_position) > PUPPET_SNAP_DISTANCE:
+		global_position = net_position
+	else:
+		global_position = global_position.lerp(net_position, k)
+	facing = lerp_angle(facing, net_facing, k)
+	_apply_facing()
+	model.set_pose(net_pose)
+	model.set_move_speed(Vector2(global_position.x - before.x, global_position.z - before.z).length() / maxf(delta, 0.0001))
+	vision_cone.visible = net_cone_visible
+	vision_cone.set_color(net_cone_color)
+	_cone_timer -= delta
+	if _cone_timer <= 0.0 and vision_cone.visible and is_inside_tree():
+		_cone_timer = Tuning.VISION_CONE_REFRESH_SECONDS
+		vision_cone.clip(get_world_3d().direct_space_state, Tuning.GUARD_EYE_HEIGHT * model.scale.y, WORLD_MASK)
+	icon.text = net_icon
+	icon.modulate = net_icon_color
+	icon.visible = net_icon != ""
+	icon.position = Vector3(0, model.get_head_top() + 0.45 + (0.7 if net_carrying >= 0 else 0.0), 0)
+	_time += delta
+	_pulse_icon()
 
 
 func _query_players() -> Array:
@@ -348,6 +443,7 @@ func _look(players: Array) -> Array:
 			"heat": heat,
 			"matches_poster": bool(p.get("matches_poster", false)),
 			"staff_uniform": bool(p.get("staff_uniform", false)),
+			"cleared": bool(p.get("cleared", false)),
 			"running": running,
 			# A pit boss only watches: its brain never approaches anyone.
 			"available": available and not pit_boss,
@@ -366,6 +462,7 @@ func _look(players: Array) -> Array:
 			"heat": float(p.get("heat", Tuning.SUSPECTED_AT)),
 			"matches_poster": bool(p.get("matches_poster", false)),
 			"staff_uniform": bool(p.get("staff_uniform", false)),
+			"cleared": bool(p.get("cleared", false)),
 			"running": false,
 			"available": bool(p.get("available", true)),
 		})
@@ -410,6 +507,8 @@ func _do_action(action: StringName) -> void:
 			_id_result = GuardBrain.ID_PENDING
 			_id_asked_at = _time
 			id_check_requested.emit(self, _id_pid)
+		GuardBrain.ACT_SHOUT:
+			shouted.emit(self, brain.target_pid)
 		GuardBrain.ACT_GRAB:
 			_carrying = brain.target_pid
 			_carry_confirmed = false
@@ -603,6 +702,9 @@ func _update_visuals(delta: float) -> void:
 	if security_type == HR.SecurityType.PIT_BOSS and _radio_flash > 0.0:
 		text = "!"
 		tint = Color(1.0, 0.5, 0.1)
+	if brain.is_reacting():
+		text = SHOUT_TEXT
+		tint = SHOUT_COLOR
 	if undercover_hidden:
 		text = ""
 	icon.text = text
@@ -612,6 +714,15 @@ func _update_visuals(delta: float) -> void:
 	if _carrying >= 0:
 		top += 0.7
 	icon.position = Vector3(0, top, 0)
+	_pulse_icon()
+
+
+## The "HEY!" bark throbs; every other icon sits still.
+func _pulse_icon() -> void:
+	var k := 1.0
+	if icon.visible and icon.text == SHOUT_TEXT:
+		k += SHOUT_PULSE * absf(sin(_time * PI * SHOUT_PULSE_HZ))
+	icon.scale = Vector3.ONE * k
 
 
 func _cone_color(state: int) -> Color:

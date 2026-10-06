@@ -220,6 +220,19 @@ func test_win_heat_comes_from_heat_rules_with_streak() -> void:
 			assert_almost_eq(r.heat, HeatRules.win_heat(HR.GameType.ROULETTE, 40, MAX_BET, r.streak, true), 0.0001)
 
 
+func test_thrown_loss_cools_in_proportion_to_the_bet() -> void:
+	assert_almost_eq(HeatRules.lose_on_purpose_heat(MAX_BET, MAX_BET), Tuning.LOSE_ON_PURPOSE_HEAT, 0.0001, "max bet: full cool-off")
+	assert_almost_eq(HeatRules.lose_on_purpose_heat(MAX_BET / 10, MAX_BET), Tuning.LOSE_ON_PURPOSE_HEAT / 10.0, 0.0001, "min bet: a tenth")
+	assert_almost_eq(HeatRules.lose_on_purpose_heat(MAX_BET * 3, MAX_BET), Tuning.LOSE_ON_PURPOSE_HEAT, 0.0001, "clamped at the max")
+	assert_almost_eq(HeatRules.lose_on_purpose_heat(50, 0), Tuning.LOSE_ON_PURPOSE_HEAT, 0.0001, "no max bet counts as the max")
+	var table := _table(HR.GameType.ROULETTE)
+	var rng := _rng(8)
+	var small := GameResolver.resolve(table, PID, 10, {"kind": "color", "color": "red", "throw": true}, rng, MAX_BET)
+	var big := GameResolver.resolve(table, PID, MAX_BET, {"kind": "color", "color": "red", "throw": true}, rng, MAX_BET)
+	assert_lt(big.heat, small.heat, "throwing more cools more")
+	assert_lt(small.heat, 0.0)
+
+
 func test_throw_forces_a_loss_with_cooling_heat() -> void:
 	var rng := _rng(4)
 	for t: int in TableGames.all_types():
@@ -231,7 +244,7 @@ func test_throw_forces_a_loss_with_cooling_heat() -> void:
 			assert_true(r.intentional_loss)
 			assert_eq(r.payout, 0)
 			assert_eq(r.net, -30)
-			assert_almost_eq(r.heat, Tuning.LOSE_ON_PURPOSE_HEAT)
+			assert_almost_eq(r.heat, HeatRules.lose_on_purpose_heat(30, MAX_BET))
 			assert_eq(r.streak, 0)
 			assert_eq(table.streak(PID), 0)
 
@@ -431,7 +444,7 @@ func test_shared_roll_splits_crew_heat_among_winners() -> void:
 	assert_almost_eq(r2.heat, total / 2.0, 0.0001)
 	assert_false(r3.won, "thrower loses a winning roll")
 	assert_true(r3.intentional_loss)
-	assert_almost_eq(r3.heat, Tuning.LOSE_ON_PURPOSE_HEAT)
+	assert_almost_eq(r3.heat, HeatRules.lose_on_purpose_heat(30, MAX_BET))
 	assert_ne(r3.detail["call"], r1.detail["call"], "thrower bet the other way")
 	assert_false(GameResolver.dice_call_wins(r3.detail["call"], r3.detail["total"]))
 
@@ -589,7 +602,7 @@ func test_high_low_throw_and_win_rate() -> void:
 	var thrown := HighLowRun.new(t, PID, 10, rng, MAX_BET, 1.0).guess(true, true)
 	assert_false(thrown.won)
 	assert_true(thrown.intentional_loss)
-	assert_almost_eq(thrown.heat, Tuning.LOSE_ON_PURPOSE_HEAT)
+	assert_almost_eq(thrown.heat, HeatRules.lose_on_purpose_heat(10, MAX_BET))
 	assert_true(thrown.detail["next_card"] < thrown.detail["card"])
 
 
@@ -654,7 +667,7 @@ func test_blackjack_hitting_hard_21_busts_on_purpose() -> void:
 		assert_not_null(r)
 		assert_false(r.won)
 		assert_true(r.intentional_loss)
-		assert_almost_eq(r.heat, Tuning.LOSE_ON_PURPOSE_HEAT)
+		assert_almost_eq(r.heat, HeatRules.lose_on_purpose_heat(10, MAX_BET))
 		assert_eq(r.payout, 0)
 		assert_eq(table.streak(PID), 0)
 		assert_eq(hand.stand(), r, "stand after a bust returns the same result")
@@ -733,7 +746,7 @@ func test_blackjack_bust_is_thrown_only_when_it_gives_up_a_win() -> void:
 		assert_eq(r.intentional_loss, hand.will_win, "seed %d cards %s" % [s, str(hand.player_cards)])
 		if hand.will_win:
 			winners += 1
-			assert_almost_eq(r.heat, Tuning.LOSE_ON_PURPOSE_HEAT)
+			assert_almost_eq(r.heat, HeatRules.lose_on_purpose_heat(10, MAX_BET))
 		else:
 			losers += 1
 			assert_almost_eq(r.heat, 0.0, 0.0001, "no free cooling on a hand that was lost anyway")
@@ -874,7 +887,7 @@ func test_high_low_throw_after_wins_forfeits_the_pot() -> void:
 		assert_true(run.finished)
 		assert_false(r.won)
 		assert_true(r.intentional_loss)
-		assert_almost_eq(r.heat, Tuning.LOSE_ON_PURPOSE_HEAT)
+		assert_almost_eq(r.heat, HeatRules.lose_on_purpose_heat(40, MAX_BET))
 		assert_eq(run.pot, 0)
 		assert_eq(r.payout, 0)
 		assert_eq(r.net, -40, "only the stake was ever taken from the pocket")

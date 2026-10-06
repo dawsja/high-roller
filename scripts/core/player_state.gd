@@ -53,6 +53,25 @@ var steal_cooldown: float = 0.0
 var high_low: HighLowRun = null
 var blackjack: BlackjackRound = null
 var round_table_id: StringName = &""
+## Seconds since the player last won a bet (INF if none this visit).
+var seconds_since_win: float = INF
+## Seconds since the last outfit change (INF if none this visit).
+var seconds_since_outfit_change: float = INF
+## Seconds since the player last sat down or played (bet, guess, hit, stand).
+## Past Tuning.LOITER_GRACE_SECONDS they are loitering (HeatRules.LOITERING).
+var loiter_seconds: float = 0.0
+## Sitting down resets loiter_seconds once per play: standing up and sitting
+## again without betting doesn't reset it again (no sit/stand farming).
+var loiter_sit_reset: bool = true
+## Seconds left of the after-rejoin grace (guards leave the player alone).
+var rejoin_grace: float = 0.0
+## Heat level at which the player last passed an ID check (lowered to the
+## lowest level since); -1 = not cleared. A passed check is crew-wide: every
+## guard leaves them alone while id_cleared().
+var id_cleared_level: int = -1
+## Whether the worn outfit matched a poster when the check was passed (a
+## new poster match ends the clearance).
+var id_cleared_poster: bool = false
 
 
 func _init(p_pid: int = 0, p_name: String = "") -> void:
@@ -84,9 +103,29 @@ func first_usable_id_index() -> int:
 	return -1
 
 
-## On the floor and grabbable: FREE, SEATED or in an ID check.
+## On the floor: FREE, SEATED or in an ID check (not carried, detained or on
+## the curb). See is_targetable() for what guards may go after.
 func is_available() -> bool:
 	return status == HR.PlayerStatus.FREE or status == HR.PlayerStatus.SEATED or status == HR.PlayerStatus.ID_CHECK
+
+
+## Guards may approach, check and grab the player: available and past the
+## after-rejoin grace. The world's guard players_provider passes this as
+## `available`.
+func is_targetable() -> bool:
+	return is_available() and rejoin_grace <= 0.0
+
+
+## Passed an ID check and hasn't drawn new attention since (their Heat level
+## hasn't risen above the level they passed at, no new poster match). Guards
+## don't walk over to check a cleared player (they still chase at Wanted).
+func id_cleared() -> bool:
+	return id_cleared_level >= 0
+
+
+## Hasn't sat down or played for longer than Tuning.LOITER_GRACE_SECONDS.
+func is_loitering() -> bool:
+	return HeatRules.is_loitering(loiter_seconds)
 
 
 ## Can make requests that need free hands: FREE or SEATED.
@@ -109,6 +148,11 @@ func round_kind() -> StringName:
 
 func level() -> int:
 	return heat.level()
+
+
+func clear_id_clearance() -> void:
+	id_cleared_level = -1
+	id_cleared_poster = false
 
 
 func reset_flags() -> void:
@@ -139,6 +183,12 @@ func begin_visit() -> void:
 	high_low = null
 	blackjack = null
 	round_table_id = &""
+	loiter_seconds = 0.0
+	loiter_sit_reset = true
+	rejoin_grace = 0.0
+	seconds_since_outfit_change = INF
+	seconds_since_win = INF
+	clear_id_clearance()
 	heat.reset()
 
 

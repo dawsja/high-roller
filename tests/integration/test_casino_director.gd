@@ -280,10 +280,12 @@ func test_grab_carry_strikes_and_the_next_visit() -> void:
 	sim.tick(Tuning.BACK_ROOM_TIMEOUT + 0.1)
 	assert_eq(_ps().status, HR.PlayerStatus.FREE, "rejoined")
 	assert_false(d.player.is_hidden())
-	var release: Vector3 = d.map.to_global(d.map.back_room_release_point)
-	assert_lt(d.player.global_position.distance_to(release), 0.5)
+	# The rejoined event says where (`spawn`): an entrance spawn point.
+	var release: Vector3 = d.map.to_global(d.map.spawn_points[0])
+	assert_lt(d.player.global_position.distance_to(release), 0.5, "rejoins at the entrance")
 
 	for strike in [2, 3]:
+		_ps().rejoin_grace = 0.0  # skip the after-rejoin grace (broke solo crew: no time to wait it out)
 		assert_true(bool(_host.request_caught(1)["ok"]))
 		assert_true(bool(_host.request_reach_back_room(1)["ok"]))
 		assert_eq(_host.run.strikes if strike < 3 else Tuning.STRIKES_TO_THROW_OUT, strike)
@@ -343,3 +345,50 @@ func test_forger_is_only_reachable_from_his_corner() -> void:
 			var z: CasinoZone = d.map.zone_at(at + Vector3(cos(a), 0.0, sin(a)) * reach)
 			assert_true(z == null or (z.zone_type == HR.ZoneType.FORGER and z.area_id == loc) or z.zone_type == HR.ZoneType.STAFF_ONLY,
 				"%s: forger reachable from %s" % [loc, str(HR.ZoneType.find_key(z.zone_type)) if z != null else "-"])
+
+
+func test_the_forger_is_solid_but_still_in_reach() -> void:
+	var d := _start(Tuning.BOTTOM_RUNG, true)
+	assert_not_null(d.forger_body)
+	assert_eq(d.forger_body.collision_layer, CasinoBuilder.WORLD_LAYER, "on the world layer")
+	assert_eq(d.forger_body.disable_mode, CollisionObject3D.DISABLE_MODE_KEEP_ACTIVE, "solid before the NPCs start")
+	var at: Vector3 = d.forger_npc.global_position
+	var center: Vector3 = d.map.to_global(d.map.bounds.get_center())
+	var toward := Vector3(center.x - at.x, 0.0, center.z - at.z).normalized()
+	d.player.teleport(at + toward * 2.0)
+	# Walk straight at him.
+	var rig := d.player.camera_rig
+	rig.yaw = atan2(toward.x, toward.z)
+	Input.action_press(&"move_forward")
+	await _frames(90)
+	Input.action_release(&"move_forward")
+	var gap := Perception.flat_distance(d.player.global_position, at)
+	assert_gt(gap, CasinoDirector.FORGER_RADIUS + Tuning.PLAYER_RADIUS - 0.05, "stopped at his coat, not inside him")
+	assert_lt(gap, 1.0, "walked right up to him")
+	assert_eq(d.player.current_interactable(), d.forger_interactable, "still close enough to buy an ID")
+	# He moves with his body.
+	var sim := _host.current_sim()
+	for loc: StringName in d.map.forger_points:
+		if loc != sim.forger.location():
+			d._move_forger(loc)
+			await _frames(2)
+			assert_lt(d.forger_body.global_position.distance_to(d.map.to_global(d.map.forger_points[loc])), 0.01, "the body follows him to %s" % loc)
+			break
+
+
+func test_a_climb_that_would_arrive_broke_says_how_much_to_keep() -> void:
+	var hud: Hud = _add(Hud.new())
+	var d := _start(Tuning.BOTTOM_RUNG, false, {"hud": hud})
+	hud.setup(_host, 1)
+	var ps := _ps()
+	ps.wallet.lose_pocket()
+	_host.run.add_bank(CasinoLadder.buy_in_to_leave(Tuning.BOTTOM_RUNG))
+	_host.request_enter_zone(1, HR.ZoneType.EXIT, &"exit")
+	var exits := d.map.interactables_of(&"exit")
+	assert_false(exits.is_empty())
+	d.interact(1, exits[0])
+	assert_false(d.finished, "no climb into a casino the crew can't bet in")
+	var stake: int = int(CasinoLadder.casino(Tuning.BOTTOM_RUNG - 1)["min_bet"])
+	assert_eq(hud.notification_texts()[0], CasinoDirector.no_stake_text({"to": Tuning.BOTTOM_RUNG - 1, "stake": stake}))
+	assert_true(hud.notification_texts()[0].contains(UiTheme.chips(stake)), "names the stake")
+	assert_true(hud.notification_texts()[0].contains(str(CasinoLadder.casino(Tuning.BOTTOM_RUNG - 1)["name"])))

@@ -4,8 +4,17 @@ extends CharacterBody3D
 ## third-person camera (local players only), an interaction sensor in front,
 ## and the seated / carried / hidden states the director puts it in.
 ## World-side only: it emits requests as signals and never touches chips,
-## Heat, IDs or outfits. Non-local players (phase 2) ignore input and have no
-## camera; the network will drive them.
+## Heat, IDs or outfits. Non-local players ignore input and have no camera.
+##
+## Emote (T): standing still and free, plays the next of `emotes` (the
+## player's unlocked emotes, set by main.gd from the profile) for
+## EMOTE_SECONDS; moving cancels it. The pose syncs like any other pose.
+##
+## Co-op: the owning peer moves its own player and publishes net_* every
+## physics frame; enable_net_sync() adds the MultiplayerSynchronizer that
+## carries them. On every other peer the player is a `puppet`: no physics and
+## no input, it eases toward the synced position and facing and copies the
+## synced pose and state.
 
 signal interact_pressed(target: Interactable)
 ## Interact held for target.hold_seconds (a tap on a hold interactable is a press).
@@ -23,6 +32,10 @@ signal pause_requested()
 signal focus_changed(target: Interactable)
 ## Jump pressed while seated: the director can stand the player up.
 signal stand_requested()
+## Give-chips pressed (H) with a teammate within GIVE_RANGE.
+signal give_chips_requested(target: PlayerCharacter)
+## An emote started (the emote key or play_emote()).
+signal emoted(emote_id: StringName)
 
 const STATE_FREE := &"free"
 const STATE_SEATED := &"seated"
@@ -36,6 +49,18 @@ const ACTION_PRONE := &"prone"
 const ACTION_TUMBLE := &"tumble"
 
 const GUARD_GROUP := &"guards"
+const GROUP := &"players"
+## A teammate this close (flat metres) can be handed chips (H).
+const GIVE_RANGE := 2.5
+## Seconds between position syncs to the other peers.
+const NET_SYNC_INTERVAL := 1.0 / 30.0
+## A puppet further than this from its synced position snaps to it.
+const PUPPET_SNAP_DISTANCE := 4.0
+## How fast a puppet closes the gap to its synced position (1/s).
+const PUPPET_SHARPNESS := 16.0
+const NAMEPLATE_HEIGHT := 2.3
+## How long one press of the emote key plays an emote.
+const EMOTE_SECONDS := 3.0
 const PLAYER_LAYER := 2
 ## World + guard + patron.
 const BODY_MASK := 1 | 4 | 8
@@ -52,6 +77,20 @@ var state: StringName = STATE_FREE
 var action: StringName = ACTION_NONE
 ## Model yaw in radians; 0 faces -Z.
 var facing: float = 0.0
+## Co-op: another peer's player, driven by the synced net_* values.
+var puppet: bool = false
+## Name over a teammate's head (co-op), or null.
+var nameplate: Label3D
+# Synced from the owner to the other peers (see enable_net_sync()).
+var net_position: Vector3 = Vector3.ZERO
+var net_facing: float = 0.0
+var net_velocity: Vector3 = Vector3.ZERO
+var net_pose: StringName = &"idle"
+var net_state: StringName = STATE_FREE
+var net_running: bool = false
+## Emotes the emote key cycles through (unlocked emote ids, CharacterModel
+## poses), in order. Starts with the starter emote.
+var emotes: Array[StringName] = [&"wave"]
 
 var _shape: CollisionShape3D
 var _front: Node3D
@@ -74,9 +113,12 @@ var _air_time := 0.0
 var _coyote := 0.0
 var _jump_buffer := 0.0
 var _bump_contacts: Dictionary = {}
+var _net_sync: bool = false
+var _next_emote: int = 0
 
 
 func _init() -> void:
+	add_to_group(GROUP)
 	collision_layer = PLAYER_LAYER
 	collision_mask = BODY_MASK
 	floor_snap_length = 0.25
@@ -138,7 +180,45 @@ func _ready() -> void:
 
 ## Holding run and moving (free, not mid-dive). Drives running_in_view.
 func is_running() -> bool:
+	if puppet:
+		return net_running
 	return _running and state == STATE_FREE and action == ACTION_NONE
+
+
+## Adds the MultiplayerSynchronizer that sends net_* from the owner (the
+## peer with this node's multiplayer authority) to the others.
+func enable_net_sync() -> void:
+	_net_sync = true
+	_publish()
+	NetSync.attach(self, [&"net_position", &"net_facing", &"net_velocity"], [&"net_pose", &"net_state", &"net_running"], NET_SYNC_INTERVAL)
+
+
+## Makes this another peer's player (see `puppet`), placed at `pos`.
+func make_puppet(pos: Vector3) -> void:
+	puppet = true
+	_reset_motion()
+	net_position = pos
+	_place(pos)
+
+
+## A name label over the head (co-op teammates); "" removes it.
+func set_nameplate(text: String, color: Color = Color.WHITE) -> void:
+	if text == "":
+		if nameplate != null:
+			nameplate.queue_free()
+			nameplate = null
+		return
+	if nameplate == null:
+		nameplate = Primitives.label(text, 0.007)
+		nameplate.name = "Nameplate"
+		nameplate.font_size = 48
+		nameplate.outline_size = 12
+		# Over walls and door frames, like the guards' icons.
+		nameplate.no_depth_test = true
+		nameplate.position = Vector3(0, NAMEPLATE_HEIGHT, 0)
+		add_child(nameplate)
+	nameplate.text = text
+	nameplate.modulate = color
 
 
 ## The interactable an interact press would use, or null.
@@ -194,6 +274,40 @@ func set_playing(playing: bool) -> void:
 func emote(pose: StringName, seconds: float) -> void:
 	_emote = pose
 	_emote_left = seconds
+
+
+## Sets the emotes the emote key plays (unknown poses are dropped); the next
+## press starts from the first.
+func set_emotes(ids: Array) -> void:
+	emotes.clear()
+	for id: Variant in ids:
+		var e := StringName(str(id))
+		if CharacterModel.EMOTES.has(e) and not emotes.has(e):
+			emotes.append(e)
+	_next_emote = 0
+
+
+## Plays an emote pose for EMOTE_SECONDS. Only while free and not mid-action
+## (dive, tackle, tumble); false otherwise or for an unknown emote.
+func play_emote(emote_id: StringName) -> bool:
+	if not CharacterModel.EMOTES.has(emote_id) or state != STATE_FREE or action != ACTION_NONE:
+		return false
+	emote(emote_id, EMOTE_SECONDS)
+	model.set_pose(emote_id)
+	emoted.emit(emote_id)
+	return true
+
+
+## The emote key: plays the next of `emotes` (cycling). Returns its id, or
+## &"" if none played.
+func play_next_emote() -> StringName:
+	if emotes.is_empty():
+		return &""
+	var id: StringName = emotes[_next_emote % emotes.size()]
+	if not play_emote(id):
+		return &""
+	_next_emote = (_next_emote + 1) % emotes.size()
+	return id
 
 
 ## Follows carrier.get_carry_point() with the carrier's facing until release().
@@ -309,6 +423,9 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _physics_process(delta: float) -> void:
+	if puppet:
+		_physics_puppet(delta)
+		return
 	match state:
 		STATE_FREE:
 			_physics_free(delta)
@@ -328,6 +445,60 @@ func _physics_process(delta: float) -> void:
 	_update_focus()
 	_update_interact(delta)
 	_update_pose(delta)
+	if _input_ready() and Input.is_action_just_pressed(&"give_chips") and (state == STATE_FREE or state == STATE_SEATED):
+		var mate := _nearest_teammate()
+		if mate != null:
+			give_chips_requested.emit(mate)
+	if _input_ready() and Input.is_action_just_pressed(&"emote"):
+		play_next_emote()
+	if _net_sync:
+		_publish()
+
+
+func _publish() -> void:
+	net_position = global_position if is_inside_tree() else position
+	net_facing = facing
+	net_velocity = velocity
+	net_pose = model.pose
+	net_state = state
+	net_running = is_running()
+
+
+## Another peer's player: ease toward the synced position, copy pose and state.
+func _physics_puppet(delta: float) -> void:
+	var k: float = 1.0 - exp(-PUPPET_SHARPNESS * delta)
+	if global_position.distance_to(net_position) > PUPPET_SNAP_DISTANCE:
+		global_position = net_position
+	else:
+		global_position = global_position.lerp(net_position, k)
+	facing = lerp_angle(facing, net_facing, k)
+	_apply_facing()
+	velocity = net_velocity
+	if net_state != state:
+		state = net_state
+		_set_collision(state == STATE_FREE)
+		model.visible = state != STATE_HIDDEN
+		if nameplate != null:
+			nameplate.visible = state != STATE_HIDDEN
+	model.set_pose(net_pose)
+	model.set_move_speed(Vector2(net_velocity.x, net_velocity.z).length())
+
+
+## The closest other player within GIVE_RANGE that isn't hidden, or null.
+func _nearest_teammate() -> PlayerCharacter:
+	if not is_inside_tree():
+		return null
+	var best: PlayerCharacter = null
+	var best_d := GIVE_RANGE * GIVE_RANGE
+	for node: Node in get_tree().get_nodes_in_group(GROUP):
+		var other := node as PlayerCharacter
+		if other == null or other == self or other.state == STATE_HIDDEN:
+			continue
+		var d := _flat_distance_sq(other.global_position)
+		if d <= best_d:
+			best = other
+			best_d = d
+	return best
 
 
 func _physics_free(delta: float) -> void:

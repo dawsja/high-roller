@@ -13,6 +13,8 @@ const T := Tuning.CASINO_WALL_THICKNESS
 const H := Tuning.CASINO_WALL_HEIGHT
 ## Underside of the pendant lamps over the tables.
 const LAMP_Y := 2.45
+## Height of the billboard signs over the game areas.
+const AREA_SIGN_Y := 2.75
 const DOOR_H := Tuning.CASINO_DOOR_HEIGHT
 const FENCE_H := Tuning.CASINO_FENCE_HEIGHT
 const G := CasinoLayouts.GRID
@@ -715,8 +717,11 @@ func _build_game_blocks() -> void:
 		var title: String = AREA_TITLES.get(id, "")
 		if title == "":
 			title = TableGames.display_name(HR.GameType.SLOTS, _rung).to_upper()
-		var area_sign := _label(title, Vector3(rect.get_center().x, 3.6, rect.get_center().y), 0.007, _accent_c.lightened(0.4), true)
+		# Under the wall tops and the floor camera's eye line, so the sign shows
+		# on the floor below the HUD's top band (the map fades it by distance).
+		var area_sign := _label(title, Vector3(rect.get_center().x, AREA_SIGN_Y, rect.get_center().y), 0.006, _accent_c.lightened(0.4), true)
 		area_sign.name = "AreaSign_%s" % String(id)
+		_map.area_signs.append(area_sign)
 
 
 func _next_table_id(game_type: int, counters: Dictionary) -> StringName:

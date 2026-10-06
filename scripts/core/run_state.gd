@@ -35,6 +35,11 @@ var fire_alarm_used: bool = false
 var visit_seconds: float = 0.0
 ## Casino visits so far, counting the current one (1 at the start of a run).
 var visits: int = 1
+## Cosmetic unlocks from each player's own profile (set_unlocks): pid ->
+## {pieces: Array[StringName], name_packs: Array[StringName]}. The gift shop
+## (locked pieces) and ID printing (name packs) read them for that player.
+## A player without an entry has nothing unlocked.
+var unlocks: Dictionary = {}
 
 
 ## `start_rung` is for tests and debug starts; a real run starts at the top.
@@ -109,10 +114,14 @@ func can_climb() -> bool:
 
 
 ## Climbs as far as the bank allows (one rung, or two by the stretch rule),
-## spending the buy-in from `bank`, and starts a new visit. Does nothing if it
-## can't climb. Returns the (possibly unchanged) rung.
-func climb() -> int:
+## spending the buy-in from `bank`, and starts a new visit. `to_rung` asks
+## for a shorter climb (one rung when the stretch is affordable); it can't go
+## further than climb_target(). Does nothing if it can't climb. Returns the
+## (possibly unchanged) rung.
+func climb(to_rung: int = -1) -> int:
 	var target := climb_target()
+	if to_rung > target and to_rung < rung:
+		target = to_rung
 	if target >= rung:
 		return rung
 	var from := rung
@@ -132,6 +141,35 @@ func withdraw(amount: int) -> bool:
 	return true
 
 
+## Records a player's unlocked outfit pieces and ID name packs (ids from
+## their profile). Unknown ids and pieces that aren't locked are dropped.
+func set_unlocks(pid: int, piece_ids: Array, pack_ids: Array) -> void:
+	var pieces: Array[StringName] = []
+	for id: Variant in piece_ids:
+		var piece := StringName(str(id))
+		if OutfitCatalog.is_unlockable(piece) and not pieces.has(piece):
+			pieces.append(piece)
+	var packs: Array[StringName] = []
+	for id: Variant in pack_ids:
+		if IdGenerator.has_name_pack(id) and not packs.has(StringName(str(id))):
+			packs.append(StringName(str(id)))
+	unlocks[pid] = {"pieces": pieces, "name_packs": packs}
+
+
+## Locked outfit pieces `pid` has unlocked (empty if none were set).
+func unlocked_pieces(pid: int) -> Array[StringName]:
+	var out: Array[StringName] = []
+	out.assign((unlocks.get(pid, {}) as Dictionary).get("pieces", []))
+	return out
+
+
+## ID name packs `pid` has unlocked (empty if none were set).
+func name_packs(pid: int) -> Array[StringName]:
+	var out: Array[StringName] = []
+	out.assign((unlocks.get(pid, {}) as Dictionary).get("name_packs", []))
+	return out
+
+
 ## Marks the once-per-visit fire alarm as pulled. False if already used.
 func use_fire_alarm() -> bool:
 	if fire_alarm_used:
@@ -140,12 +178,14 @@ func use_fire_alarm() -> bool:
 	return true
 
 
-func tick(delta: float) -> void:
+## `scoring`: whether time at the top counts towards the score right now
+## (FloorSim passes false while the whole crew is held or broke).
+func tick(delta: float, scoring: bool = true) -> void:
 	if delta <= 0.0:
 		return
 	elapsed_seconds += delta
 	visit_seconds += delta
-	if is_top():
+	if is_top() and scoring:
 		top_seconds += delta
 
 

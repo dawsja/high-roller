@@ -33,6 +33,9 @@ const HIGH_LOW_STREAK_HEAT_STEP := 4.0
 const CAMP_GRACE_SECONDS := 30.0
 const CAMP_HEAT_PER_SECOND := 0.5
 
+## Thrown loss at the max bet; a smaller throw cools in proportion to its
+## share of the max bet (HeatRules.lose_on_purpose_heat), so min-bet throws
+## can't launder a big win's Heat for pocket change.
 const LOSE_ON_PURPOSE_HEAT := -10.0
 ## One-off cool-down for entering a different game area.
 const AREA_CHANGE_HEAT := -6.0
@@ -41,9 +44,20 @@ const AREA_CHANGE_COOLDOWN := 20.0
 const OFF_TABLE_HEAT_PER_SECOND := -2.0
 ## Per second while seated at a slot machine (blending into the crowd).
 const SLOT_BLEND_HEAT_PER_SECOND := -1.0
+## A machine paying out draws eyes: no slot blend for this long after a win.
+## (Max-bet slots plus the odd min-bet throw were heat-neutral forever.)
+const SLOT_BLEND_WIN_PAUSE_SECONDS := 6.0
 ## Per second anywhere else on the floor while not seated.
 const FLOOR_DECAY_PER_SECOND := -0.2
+## Loitering: a player who hasn't played (sat down or placed a bet) for this
+## long gains LOITER_HEAT_PER_SECOND instead of the off-table / floor / slot
+## cool-down ("Security notices someone who isn't playing").
+const LOITER_GRACE_SECONDS := 45.0
+const LOITER_HEAT_PER_SECOND := 0.6
 const CHANGE_OUTFIT_HEAT := -15.0
+## Changing outfit again within this many seconds still changes the look but
+## cools nothing (swapping two stash outfits back and forth was a free reset).
+const CHANGE_OUTFIT_COOLDOWN := 30.0
 
 ## Per second while running inside a guard's view.
 const RUN_IN_VIEW_HEAT_PER_SECOND := 2.0
@@ -92,12 +106,19 @@ const ID_QUIZ_SECONDS := 5.0
 const ID_QUIZ_OPTIONS := 3
 ## A player who walks away from an ID check is chased.
 const ID_CHECK_WALKAWAY_DISTANCE := 4.0
+## After a failed ID check the guard stands and shouts this long before
+## chasing, and can't grab meanwhile: the player gets a head start.
+const ID_FAIL_REACTION_SECONDS := 1.2
+## A guard walking over to check a Suspected player keeps coming until their
+## Heat drops below this (hysteresis below SUSPECTED_AT).
+const WALKOVER_RELEASE_AT := 40.0
 
-## Noise radii (metres) by event.
+## Noise radii (metres) by event. Tuning pass: big wheel 30 -> 16 and slot
+## jackpot 25 -> 18 (30 m pulled every guard on the Apex floor).
 const NOISE_RADIUS := {
 	&"knock_over": 10.0,
-	&"big_wheel": 30.0,
-	&"slot_jackpot": 25.0,
+	&"big_wheel": 16.0,
+	&"slot_jackpot": 18.0,
 	&"bump": 8.0,
 	&"throw_chips": 12.0,
 	&"fire_alarm": 1000.0,
@@ -112,6 +133,10 @@ const THROW_CHIPS_BLOCK_RADIUS := 4.0
 const SLOT_ALARM_COOLDOWN := 60.0
 const FIRE_ALARM_SECONDS := 15.0
 const BACK_ROOM_TIMEOUT := 10.0
+## After rejoining (back room or curb) guards leave the player alone this long
+## (PlayerState.is_targetable() is false); ends early on sitting down or
+## reaching Watched.
+const REJOIN_GRACE_SECONDS := 10.0
 const CURB_TIMEOUT := 8.0
 const STRIKES_TO_THROW_OUT := 3
 
@@ -130,6 +155,8 @@ const ID_GRADES := {
 }
 
 # --- Economy ----------------------------------------------------------------
+## Pocket for a new player when a casino row has no start_chips (each
+## Tuning.CASINOS row sets its own; this is The Apex's).
 const START_CHIPS := 1500
 ## Given to each player at Sal's when the crew can no longer cover a min bet.
 const BAILOUT_CHIPS := 50
@@ -152,31 +179,39 @@ const ROULETTE_NUMBER_HEAT_CLASS := HR.HeatClass.VERY_HIGH
 
 # --- Casino ladder ----------------------------------------------------------
 ## Index 0 is rung 1 (the top). buy_in is what the crew must bank in the casino
-## below to climb into this one. Bet limits and payout_bonus grow going up.
+## below to climb into this one. start_chips is each new player's pocket when
+## a run starts at this rung (FloorSim.add_player). Bet limits and
+## payout_bonus grow going up.
+## Tuning pass (seeded solo climb, tests/integration/test_sim_scenarios.gd:
+## bet 60% of max every round + 3 s, cool off at the bar on Watched, no
+## guards): buy-ins Apex 17000 -> 21000, Grand 6000 -> 7500, Riverboat
+## 2000 -> 2500, Rusty 200 -> 100 so that a clean climb lands a little under
+## climb_minutes (guards, cameras and walking add the rest); start_chips
+## replace the flat START_CHIPS (1500 everywhere made Sal's a 30 s climb).
 const CASINOS := [
 	{"rung": 1, "id": &"apex", "name": "The Apex", "setting": "Rooftop sky casino, glass and gold",
 		"guards": 8, "security": [HR.SecurityType.FLOOR_GUARD, HR.SecurityType.CAMERA, HR.SecurityType.PIT_BOSS, HR.SecurityType.UNDERCOVER, HR.SecurityType.HEAD_OF_SECURITY],
-		"climb_minutes": 0, "buy_in": 17000, "min_bet": 250, "max_bet": 2500, "payout_bonus": 1.5,
+		"start_chips": 1500, "climb_minutes": 0, "buy_in": 21000, "min_bet": 250, "max_bet": 2500, "payout_bonus": 1.5,
 		"floor_color": Color("2b2233"), "wall_color": Color("d9b45a"), "accent_color": Color("f5e6b8")},
 	{"rung": 2, "id": &"grand_marquee", "name": "The Grand Marquee", "setting": "Classic strip mega-floor",
 		"guards": 6, "security": [HR.SecurityType.FLOOR_GUARD, HR.SecurityType.CAMERA, HR.SecurityType.PIT_BOSS, HR.SecurityType.UNDERCOVER],
-		"climb_minutes": 10, "buy_in": 6000, "min_bet": 100, "max_bet": 1000, "payout_bonus": 1.4,
+		"start_chips": 800, "climb_minutes": 10, "buy_in": 7500, "min_bet": 100, "max_bet": 1000, "payout_bonus": 1.4,
 		"floor_color": Color("5a1e2c"), "wall_color": Color("c9a227"), "accent_color": Color("ffd166")},
 	{"rung": 3, "id": &"riverboat_queen", "name": "The Riverboat Queen", "setting": "Paddle steamer with narrow decks",
 		"guards": 4, "security": [HR.SecurityType.FLOOR_GUARD, HR.SecurityType.CAMERA, HR.SecurityType.PIT_BOSS],
-		"climb_minutes": 7, "buy_in": 2000, "min_bet": 50, "max_bet": 500, "payout_bonus": 1.3,
+		"start_chips": 400, "climb_minutes": 7, "buy_in": 2500, "min_bet": 50, "max_bet": 500, "payout_bonus": 1.3,
 		"floor_color": Color("4a3426"), "wall_color": Color("e8dcc0"), "accent_color": Color("b33a3a")},
 	{"rung": 4, "id": &"neon_oasis", "name": "Neon Oasis", "setting": "Off-strip 1970s motel casino",
 		"guards": 3, "security": [HR.SecurityType.FLOOR_GUARD, HR.SecurityType.CAMERA, HR.SecurityType.PIT_BOSS],
-		"climb_minutes": 5, "buy_in": 500, "min_bet": 25, "max_bet": 250, "payout_bonus": 1.2,
+		"start_chips": 200, "climb_minutes": 5, "buy_in": 500, "min_bet": 25, "max_bet": 250, "payout_bonus": 1.2,
 		"floor_color": Color("1f3b4d"), "wall_color": Color("ff6fb5"), "accent_color": Color("3ef0d0")},
 	{"rung": 5, "id": &"rusty_spur", "name": "The Rusty Spur", "setting": "Desert truck-stop saloon",
 		"guards": 2, "security": [HR.SecurityType.FLOOR_GUARD],
-		"climb_minutes": 3, "buy_in": 200, "min_bet": 10, "max_bet": 100, "payout_bonus": 1.1,
+		"start_chips": 80, "climb_minutes": 3, "buy_in": 100, "min_bet": 10, "max_bet": 100, "payout_bonus": 1.1,
 		"floor_color": Color("6b4a2e"), "wall_color": Color("c27c3e"), "accent_color": Color("e3c08d")},
 	{"rung": 6, "id": &"sals_back_room", "name": "Sal's Back Room", "setting": "Basement card room behind a laundromat",
 		"guards": 1, "security": [HR.SecurityType.FLOOR_GUARD],
-		"climb_minutes": 2, "buy_in": 0, "min_bet": 5, "max_bet": 50, "payout_bonus": 1.0,
+		"start_chips": 50, "climb_minutes": 2, "buy_in": 0, "min_bet": 5, "max_bet": 50, "payout_bonus": 1.0,
 		"floor_color": Color("3d4a3a"), "wall_color": Color("8a8f7a"), "accent_color": Color("d6c98f")},
 ]
 const TOP_RUNG := 1

@@ -3,6 +3,7 @@ extends Control
 ## The ID forger: buy a cheap, solid or flawless card (price, winnings cap,
 ## chance a guard spots it on sight) with request_buy_id, and swap between the
 ## cards you hold with request_swap_id. Burned and flagged cards are marked.
+## Results arrive as host.request_done.
 
 signal closed()
 
@@ -33,10 +34,12 @@ func _init() -> void:
 func setup(p_host: SimHost, p_pid: int) -> void:
 	if host != null and host.sim_event.is_connected(_on_sim_event):
 		host.sim_event.disconnect(_on_sim_event)
+		host.request_done.disconnect(_on_request_done)
 	host = p_host
 	pid = p_pid
 	if host != null:
 		host.sim_event.connect(_on_sim_event)
+		host.request_done.connect(_on_request_done)
 
 
 func open() -> void:
@@ -59,27 +62,28 @@ func is_open() -> bool:
 func buy(grade: int) -> Dictionary:
 	if host == null:
 		return {"ok": false, "reason": SimHost.NO_SIM}
-	var res: Dictionary = host.request_buy_id(pid, grade)
-	if bool(res.get("ok", false)):
-		var card: Dictionary = res.get("id", {})
-		_result("You're %s now. Born %s, from %s. Remember that!" % [str(card.get("name", "")), str(card.get("birthday", "")), str(card.get("home_state", ""))], UiTheme.WIN_COLOR)
-	else:
-		_result(UiTheme.reason_text(StringName(str(res.get("reason", "")))), UiTheme.LOSS_COLOR)
-	refresh()
-	return res
+	return host.request_buy_id(pid, grade)
 
 
 func swap(index: int) -> Dictionary:
 	if host == null:
 		return {"ok": false, "reason": SimHost.NO_SIM}
-	var res: Dictionary = host.request_swap_id(pid, index)
-	if bool(res.get("ok", false)):
+	return host.request_swap_id(pid, index)
+
+
+func _on_request_done(request: StringName, args: Array, res: Dictionary) -> void:
+	if args.is_empty() or int(args[0]) != pid or not (request in [&"buy_id", &"swap_id"]):
+		return
+	if not bool(res.get("ok", false)):
+		_result(UiTheme.reason_text(StringName(str(res.get("reason", "")))), UiTheme.LOSS_COLOR)
+	elif request == &"buy_id":
+		var card: Dictionary = res.get("id", {})
+		_result("You're %s now. Born %s, from %s. Remember that!" % [str(card.get("name", "")), str(card.get("birthday", "")), str(card.get("home_state", ""))], UiTheme.WIN_COLOR)
+	else:
 		var card: Dictionary = res.get("id", {})
 		_result("Playing as %s." % str(card.get("name", "")), UiTheme.WIN_COLOR)
-	else:
-		_result(UiTheme.reason_text(StringName(str(res.get("reason", "")))), UiTheme.LOSS_COLOR)
-	refresh()
-	return res
+	if visible:
+		refresh()
 
 
 func refresh() -> void:

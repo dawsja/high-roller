@@ -1,10 +1,23 @@
 class_name TitleScreen
 extends Control
 ## Title screen: start a run at The Apex, practice at Sal's Back Room, see the
-## controls sheet (every InputSetup action with its keys and pad buttons), or quit.
+## controls sheet (every InputSetup action with its keys and pad buttons), or
+## quit. Co-op: a player name, "Host co-op" and "Join co-op" (address and
+## port, default 127.0.0.1:24565) over ENet, and "Steam: host lobby / invite
+## friends" when GodotSteam is installed. show_message() puts a line under
+## the menu (why a connection failed or ended). "Unlocks" and "Leaderboard"
+## ask main.gd to open the progression screens (set_unlock_badge() counts
+## unseen unlocks on the button).
 
 signal start_requested(start_rung: int, practice: bool)
 signal quit_requested()
+signal host_requested(port: int, player_name: String)
+signal join_requested(address: String, port: int, player_name: String)
+signal steam_host_requested(player_name: String)
+signal unlocks_requested()
+signal leaderboard_requested()
+
+const DEFAULT_ADDRESS := "127.0.0.1"
 
 ## What each InputSetup action does, for the controls sheet.
 const ACTION_TEXT := {
@@ -19,6 +32,8 @@ const ACTION_TEXT := {
 	&"tackle": "Tackle a guard (frees a teammate)",
 	&"throw_chips": "Throw chips: the crowd rushes in",
 	&"knock_over": "Knock over a tray (noise)",
+	&"give_chips": "Hand chips to the nearest teammate",
+	&"emote": "Emote (cycles your unlocked emotes)",
 	&"pause": "Pause",
 	&"toggle_debug": "Debug overlay",
 	&"ui_quiz_1": "ID quiz answer 1 / table choice 1",
@@ -43,9 +58,19 @@ var tagline_label: Label
 var start_button: Button
 var practice_button: Button
 var controls_button: Button
+var unlocks_button: Button
+var leaderboard_button: Button
 var quit_button: Button
 var controls_panel: Control
 var controls_back_button: Button
+var name_edit: LineEdit
+var address_edit: LineEdit
+var port_edit: LineEdit
+var host_button: Button
+var join_button: Button
+## Only visible when Steam (GodotSteam) is available.
+var steam_button: Button
+var message_label: Label
 ## Action names listed on the controls sheet, in order.
 var listed_actions: Array[StringName] = []
 
@@ -82,6 +107,30 @@ func _init() -> void:
 func setup(p_host: SimHost, p_pid: int) -> void:
 	host = p_host
 	pid = p_pid
+
+
+## A line under the menu ("" hides it).
+func show_message(text: String, color: Color = UiTheme.LOSS_COLOR) -> void:
+	message_label.text = text
+	message_label.add_theme_color_override(&"font_color", color)
+	message_label.visible = text != ""
+
+
+func player_name() -> String:
+	var text := name_edit.text.strip_edges()
+	return text if text != "" else "Player"
+
+
+## The port field (NetSession.DEFAULT_PORT if it isn't a valid port).
+func port() -> int:
+	var p: int = port_edit.text.strip_edges().to_int()
+	return p if p > 0 and p < 65536 else NetSession.DEFAULT_PORT
+
+
+## "Unlocks" plus how many unlocks haven't been looked at yet (0 = none).
+func set_unlock_badge(count: int) -> void:
+	unlocks_button.text = "Unlocks  (%d new)" % count if count > 0 else "Unlocks"
+	unlocks_button.theme_type_variation = &"" if count > 0 else &"BlueButton"
 
 
 func show_controls(on: bool = true) -> void:
@@ -192,11 +241,25 @@ func _build() -> void:
 	start_button.pressed.connect(func() -> void: start_requested.emit(Tuning.TOP_RUNG, false))
 	practice_button = _menu_button("Practice at %s (%d guard%s)" % [str(sals.get("name", "Sal's Back Room")), guards, "" if guards == 1 else "s"], &"GreenButton")
 	practice_button.pressed.connect(func() -> void: start_requested.emit(Tuning.BOTTOM_RUNG, true))
-	controls_button = _menu_button("Controls", &"BlueButton")
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override(&"separation", 12)
+	_menu.add_child(row)
+	controls_button = _row_button(row, "Controls")
 	controls_button.pressed.connect(show_controls.bind(true))
+	unlocks_button = _row_button(row, "Unlocks")
+	unlocks_button.pressed.connect(func() -> void: unlocks_requested.emit())
+	leaderboard_button = _row_button(row, "Leaderboard")
+	leaderboard_button.pressed.connect(func() -> void: leaderboard_requested.emit())
+	_build_coop(_menu)
 	quit_button = _menu_button("Quit", &"RedButton")
 	quit_button.pressed.connect(func() -> void: quit_requested.emit())
-	var foot := UiTheme.make_label("A co-op casino party game  ·  phase 1 prototype", &"SmallLabel")
+	message_label = UiTheme.make_label("", &"BigLabel", 24)
+	message_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	message_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	message_label.custom_minimum_size = Vector2(640, 0)
+	message_label.visible = false
+	column.add_child(message_label)
+	var foot := UiTheme.make_label("A co-op casino party game for 1 to 4  ·  prototype", &"SmallLabel")
 	foot.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	column.add_child(foot)
 
@@ -209,10 +272,64 @@ func _build() -> void:
 	overlay.add_child(controls_panel)
 
 
+## Co-op: name, host / join with address and port, Steam.
+func _build_coop(parent: Control) -> void:
+	var box := UiTheme.make_panel(&"InsetPanel")
+	parent.add_child(box)
+	var v := VBoxContainer.new()
+	v.add_theme_constant_override(&"separation", 8)
+	box.add_child(v)
+	var top := HBoxContainer.new()
+	top.add_theme_constant_override(&"separation", 10)
+	v.add_child(top)
+	var nl := UiTheme.make_label("CO-OP  Name", &"SmallLabel")
+	nl.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	top.add_child(nl)
+	name_edit = LineEdit.new()
+	name_edit.text = "Player"
+	name_edit.max_length = NetSession.MAX_NAME_LENGTH
+	name_edit.custom_minimum_size = Vector2(190, 46)
+	name_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	top.add_child(name_edit)
+	host_button = UiTheme.make_button("Host co-op", &"BlueButton", Vector2(180, 46))
+	host_button.pressed.connect(func() -> void: host_requested.emit(port(), player_name()))
+	top.add_child(host_button)
+	var bottom := HBoxContainer.new()
+	bottom.add_theme_constant_override(&"separation", 10)
+	v.add_child(bottom)
+	address_edit = LineEdit.new()
+	address_edit.text = DEFAULT_ADDRESS
+	address_edit.placeholder_text = "Host address"
+	address_edit.custom_minimum_size = Vector2(220, 46)
+	address_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	bottom.add_child(address_edit)
+	port_edit = LineEdit.new()
+	port_edit.text = str(NetSession.DEFAULT_PORT)
+	port_edit.custom_minimum_size = Vector2(100, 46)
+	bottom.add_child(port_edit)
+	join_button = UiTheme.make_button("Join co-op", &"BlueButton", Vector2(180, 46))
+	join_button.pressed.connect(func() -> void:
+		var address := address_edit.text.strip_edges()
+		join_requested.emit(address if address != "" else DEFAULT_ADDRESS, port(), player_name()))
+	bottom.add_child(join_button)
+	steam_button = UiTheme.make_button("Steam: host lobby / invite friends", &"GreenButton", Vector2(0, 46))
+	steam_button.pressed.connect(func() -> void: steam_host_requested.emit(player_name()))
+	steam_button.visible = NetSession.steam_available()
+	v.add_child(steam_button)
+
+
 func _menu_button(text: String, variation: StringName) -> Button:
 	var b := UiTheme.make_button(text, variation, Vector2(640, 72))
 	b.add_theme_font_size_override(&"font_size", 30)
 	_menu.add_child(b)
+	return b
+
+
+func _row_button(row: HBoxContainer, text: String) -> Button:
+	var b := UiTheme.make_button(text, &"BlueButton", Vector2(0, 60))
+	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	b.add_theme_font_size_override(&"font_size", 26)
+	row.add_child(b)
 	return b
 
 

@@ -5,13 +5,18 @@ extends Node3D
 ##
 ## apply_outfit() gives every OutfitCatalog piece id its own shape (NONE draws
 ## nothing); apply_uniform() dresses casino staff; set_pose() picks a procedural
-## animation that runs in _process (advance() steps it by hand).
+## animation that runs in _process (advance() steps it by hand). The emote
+## poses (EMOTES: Unlocks emote ids) loop until another pose is set; chip_flip
+## also flips a chip off the right thumb.
 ## Purely visual: it never changes chips, Heat, IDs or outfits.
 
 ## A one-shot pose (tumble) finished and the model went back to idle.
 signal pose_finished(pose: StringName)
 
-const POSES: Array[StringName] = [&"idle", &"walk", &"run", &"sit", &"play", &"celebrate", &"carried", &"carry", &"tackle", &"dive", &"tumble", &"jump"]
+const POSES: Array[StringName] = [&"idle", &"walk", &"run", &"sit", &"play", &"celebrate", &"carried", &"carry", &"tackle", &"dive", &"tumble", &"jump",
+	&"wave", &"shrug", &"chip_flip", &"dance", &"bow"]
+## Poses a player can emote with (Unlocks.EMOTE_NAMES ids).
+const EMOTES: Array[StringName] = [&"wave", &"shrug", &"chip_flip", &"dance", &"bow"]
 const UNIFORMS: Array[StringName] = [&"guard", &"pit_boss", &"head_of_security", &"dealer", &"staff"]
 
 # Body measurements in metres (rest pose, unscaled).
@@ -48,6 +53,10 @@ const SILVER := Color("c8ccd2")
 const LENS_DARK := Color("1d2026")
 const LENS_CLEAR := Color(0.85, 0.93, 1.0, 0.45)
 const UNIFORM_SHOES := Color("141416")
+const CHIP_COLOR := Color("c8283c")
+## chip_flip: seconds per flip and how high the chip goes (m).
+const CHIP_FLIP_SECONDS := 1.1
+const CHIP_FLIP_HEIGHT := 0.5
 
 # Dressing groups: HR.OutfitSlot values, plus two extra groups for uniform bits.
 const _EXTRA_A := 5
@@ -107,6 +116,8 @@ var _hair_cap: MeshInstance3D
 var _hair_puff: MeshInstance3D
 var _ring: MeshInstance3D
 var _disc: MeshInstance3D
+## The chip chip_flip tosses (hidden in every other pose).
+var _chip: MeshInstance3D
 
 var _groups: Dictionary = {}
 var _primary: Dictionary = {}
@@ -133,6 +144,7 @@ var _from_offset := Vector3.ZERO
 func _init() -> void:
 	_build_body()
 	_build_highlight()
+	_build_chip()
 	_target.resize(JOINT_COUNT)
 	_target.fill(Vector3.ZERO)
 	_from.resize(JOINT_COUNT)
@@ -274,6 +286,11 @@ func get_highlight() -> Color:
 	return _highlight
 
 
+## The flipped chip's mesh (visible only in the chip_flip pose).
+func get_chip() -> MeshInstance3D:
+	return _chip
+
+
 ## Height of the top of the head (hat and hair included) above the feet, in
 ## this node's local space, for indicators above the head. Rest pose.
 func get_head_top() -> float:
@@ -342,6 +359,7 @@ func advance(delta: float) -> void:
 	for i in JOINT_COUNT:
 		_joints[i].rotation = _from[i].lerp(_target[i], w)
 	_hips.position = Vector3(0, HIP_Y, 0) + _from_offset.lerp(_target_offset, w)
+	_update_chip()
 	if pose == &"tumble" and _pose_time >= Tuning.CHARACTER_TUMBLE_SECONDS:
 		set_pose(&"idle")
 		pose_finished.emit(&"tumble")
@@ -401,6 +419,37 @@ func _build_highlight() -> void:
 	for mi: MeshInstance3D in [_ring, _disc]:
 		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		mi.visible = false
+
+
+func _build_chip() -> void:
+	_chip = _add(self, _cyl_mesh(0.045, 0.014, 12), CHIP_COLOR, Vector3.ZERO)
+	_chip.name = "Chip"
+	_chip.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_chip.visible = false
+	var stripe := _add(_chip, _cyl_mesh(0.03, 0.016, 12), Color("f5f5f0"), Vector3.ZERO)
+	stripe.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+
+## chip_flip: the chip rests on the right hand, then flies up and spins.
+func _update_chip() -> void:
+	_chip.visible = pose == &"chip_flip"
+	if not _chip.visible:
+		return
+	var u := fmod(_pose_time, CHIP_FLIP_SECONDS) / CHIP_FLIP_SECONDS
+	var flight := clampf((u - 0.12) / 0.76, 0.0, 1.0)
+	var hand := _point_in_model(_hands[1], Vector3(0, -0.02, -0.03))
+	_chip.position = hand + Vector3(0, 0.07 + CHIP_FLIP_HEIGHT * sin(PI * flight), 0)
+	_chip.rotation = Vector3(flight * TAU * 3.0, 0.0, 0.3)
+
+
+## A point in `node`'s space, in this model's space (works outside the tree).
+func _point_in_model(node: Node3D, local: Vector3) -> Vector3:
+	var t := Transform3D.IDENTITY
+	var n: Node = node
+	while n != self and n != null:
+		t = (n as Node3D).transform * t
+		n = n.get_parent()
+	return t * local
 
 
 func _apply_appearance() -> void:
@@ -561,6 +610,27 @@ func _build_hat(id: StringName, c: Color) -> void:
 				var a := TAU * float(i) / 5.0
 				_add(_head, _cyl_mesh(0.035, 0.1, 6, 0.0), c, Vector3(sin(a) * 0.15, 0.27, -cos(a) * 0.15), Vector3.ZERO, g, 0.15)
 			_add(_head, _sphere_mesh(0.03, 6), Color("e0115f"), Vector3(0, 0.17, -0.172), Vector3.ZERO, g)
+		&"propeller_beanie":
+			_add(_head, _hemi_mesh(0.218), c, Vector3(0, 0.05, 0), Vector3.ZERO, g)
+			_add(_head, _cyl_mesh(0.222, 0.045, 12), Color("f4c430"), Vector3(0, 0.07, 0), Vector3.ZERO, g)
+			_add(_head, _cyl_mesh(0.012, 0.07, 6), SILVER, Vector3(0, 0.29, 0), Vector3.ZERO, g)
+			_add(_head, _sphere_mesh(0.028, 6), Color("d7263d"), Vector3(0, 0.325, 0), Vector3.ZERO, g)
+			_add(_head, _box_mesh(Vector3(0.32, 0.012, 0.055)), Color("d7263d"), Vector3(0, 0.326, 0), Vector3(0, 0.5, 0.06), g)
+			_add(_head, _box_mesh(Vector3(0.32, 0.012, 0.056)), Color("f4c430"), Vector3(0, 0.33, 0), Vector3(0, 0.5 + PI * 0.5, -0.06), g)
+		&"pirate_tricorn":
+			_add(_head, _cyl_mesh(0.19, 0.17, 10, 0.17), c, Vector3(0, 0.22, 0), Vector3.ZERO, g)
+			for i in 3:
+				var a := TAU * float(i) / 3.0
+				var dir := Vector3(sin(a), 0.0, cos(a))
+				_add(_head, _box_mesh(Vector3(0.66, 0.12, 0.026)), c.darkened(0.1), dir * 0.21 + Vector3(0, 0.17, 0), Vector3(0.3, a, 0), g)
+				_add(_head, _box_mesh(Vector3(0.66, 0.02, 0.03)), GOLD, dir * 0.228 + Vector3(0, 0.228, 0), Vector3(0.3, a, 0), g, 0.2)
+			_add(_head, _sphere_mesh(0.03, 6), Color("f5f5f0"), Vector3(0, 0.27, -0.17), Vector3.ZERO, g, 0.0, Vector3(1.0, 1.0, 0.5))
+		&"viking_helmet":
+			_add(_head, _hemi_mesh(0.226), c, Vector3(0, 0.04, 0), Vector3.ZERO, g, 0.1, Vector3(1.0, 1.12, 1.0))
+			_add(_head, _cyl_mesh(0.23, 0.05, 12), c.darkened(0.3), Vector3(0, 0.06, 0), Vector3.ZERO, g)
+			_add(_head, _box_mesh(Vector3(0.04, 0.15, 0.025)), c.darkened(0.3), Vector3(0, 0.0, -0.215), Vector3(-0.1, 0, 0), g)
+			for s: float in [-1.0, 1.0]:
+				_add(_head, _cyl_mesh(0.05, 0.24, 8, 0.0), Color("f1e6c8"), Vector3(s * 0.25, 0.2, 0.0), Vector3(0, 0, -s * 0.85), g)
 		&"staff_hat":
 			_add(_head, _cyl_mesh(0.165, 0.12, 10), c, Vector3(0, 0.2, 0), Vector3(0, 0, 0.12), g)
 			_add(_head, _cyl_mesh(0.17, 0.03, 10), GOLD, Vector3(-0.005, 0.16, 0), Vector3(0, 0, 0.12), g)
@@ -629,6 +699,22 @@ func _build_glasses(id: StringName, c: Color) -> void:
 				_add(_head, _box_mesh(Vector3(0.1, 0.085, 0.02)), black, Vector3(s * 0.08, 0.035, z), Vector3.ZERO, g)
 				_add(_head, _box_mesh(Vector3(0.07, 0.055, 0.012)), LENS_CLEAR, Vector3(s * 0.08, 0.035, z - 0.008), Vector3.ZERO, g)
 				_temple(s, black, g)
+		&"retro_3d_glasses":
+			_add(_head, _box_mesh(Vector3(0.31, 0.1, 0.018)), c, Vector3(0, 0.035, z), Vector3.ZERO, g)
+			_add(_head, _box_mesh(Vector3(0.105, 0.064, 0.012)), Color(0.92, 0.16, 0.16, 0.85), Vector3(-0.075, 0.035, z - 0.009), Vector3.ZERO, g)
+			_add(_head, _box_mesh(Vector3(0.105, 0.064, 0.013)), Color(0.2, 0.8, 0.95, 0.85), Vector3(0.075, 0.035, z - 0.009), Vector3.ZERO, g)
+			for s: float in [-1.0, 1.0]:
+				_temple(s, c, g)
+		&"eye_patch":
+			_add(_head, _sphere_mesh(0.058, 8), c, Vector3(-0.075, 0.035, -0.198), Vector3.ZERO, g, 0.0, Vector3(1.0, 0.85, 0.35))
+			_add(_head, _cyl_mesh(0.206, 0.018, 14), c, Vector3(0, 0.07, 0), Vector3(0, 0, 0.32), g)
+		&"diamond_shades":
+			for s: float in [-1.0, 1.0]:
+				_add(_head, _prism_mesh(Vector3(0.12, 0.055, 0.02)), c, Vector3(s * 0.08, 0.062, z), Vector3.ZERO, g, 0.35)
+				_add(_head, _prism_mesh(Vector3(0.12, 0.075, 0.02)), c, Vector3(s * 0.08, -0.003, z), Vector3(0, 0, PI), g, 0.35)
+				_add(_head, _sphere_mesh(0.012, 6), Color.WHITE, Vector3(s * 0.08 + 0.04, 0.07, z - 0.012), Vector3.ZERO, g, 0.8)
+				_temple(s, SILVER, g)
+			_add(_head, _box_mesh(Vector3(0.05, 0.012, 0.012)), SILVER, Vector3(0, 0.04, z - 0.004), Vector3.ZERO, g)
 		&"u_black_shades":
 			_add(_head, _box_mesh(Vector3(0.3, 0.02, 0.02)), c, Vector3(0, 0.07, z), Vector3.ZERO, g)
 			for s: float in [-1.0, 1.0]:
@@ -702,6 +788,34 @@ func _build_top(id: StringName, c: Color) -> void:
 			for s: float in [-1.0, 1.0]:
 				_add(_spine, _box_mesh(Vector3(0.08, 0.5, 0.012)), cream, Vector3(s * 0.14, 0.24, -0.146), Vector3.ZERO, g)
 			_collar_tips(cream, g)
+		&"polka_dot_shirt":
+			long_sleeves = false
+			_add(_spine, _cyl_mesh(0.1, 0.022, 10), Color("f5f5f0"), Vector3(0, 0.49, -0.005), Vector3.ZERO, g)
+			for p: Vector3 in [Vector3(-0.15, 0.38, -1), Vector3(0.0, 0.32, -1), Vector3(0.15, 0.38, -1), Vector3(-0.09, 0.2, -1), Vector3(0.09, 0.2, -1),
+					Vector3(-0.17, 0.07, -1), Vector3(0.0, 0.07, -1), Vector3(0.17, 0.07, -1), Vector3(-0.1, 0.3, 1), Vector3(0.1, 0.3, 1), Vector3(0.0, 0.12, 1)]:
+				_add(_spine, _sphere_mesh(0.033, 6), Color("f5f5f0"), Vector3(p.x, p.y, p.z * 0.142), Vector3.ZERO, g, 0.0, Vector3(1.0, 1.0, 0.3))
+			for i in 2:
+				_add(_shoulders[i], _sphere_mesh(0.03, 6), Color("f5f5f0"), Vector3((-1.0 if i == 0 else 1.0) * 0.077, -0.1, 0), Vector3.ZERO, g, 0.0, Vector3(0.3, 1.0, 1.0))
+		&"trench_coat":
+			_torso.scale = Vector3(1.06, 1.0, 1.1)
+			var belt := c.darkened(0.35)
+			_add(_hips, _cyl_mesh(0.3, 0.44, 10, 0.25), c, Vector3(0, -0.15, 0), Vector3.ZERO, g)
+			_add(_spine, _box_mesh(Vector3(0.56, 0.06, 0.33)), belt, Vector3(0, 0.03, 0), Vector3.ZERO, g)
+			_add(_spine, _box_mesh(Vector3(0.06, 0.05, 0.015)), GOLD, Vector3(0, 0.03, -0.17), Vector3.ZERO, g, 0.2)
+			for s: float in [-1.0, 1.0]:
+				_add(_spine, _prism_mesh(Vector3(0.12, 0.14, 0.03)), c.lightened(0.1), Vector3(s * 0.13, 0.53, -0.08), Vector3(0.35, 0, -s * 0.3), g)
+				for y: float in [0.33, 0.2]:
+					_add(_spine, _sphere_mesh(0.017, 6), belt, Vector3(s * 0.07, y, -0.155), Vector3.ZERO, g)
+			_lapels(c.darkened(0.15), g)
+		&"gold_tuxedo":
+			emission = 0.3
+			_shirt_v(SHIRT_WHITE, g)
+			_lapels(Color("15151a"), g)
+			for s: float in [-1.0, 1.0]:
+				_add(_spine, _prism_mesh(Vector3(0.07, 0.06, 0.026)), Color("15151a"), Vector3(s * 0.04, 0.455, -0.16), Vector3(0, 0, s * PI * 0.5), g)
+				_add(_hips, _box_mesh(Vector3(0.13, 0.32, 0.02)), c, Vector3(s * 0.08, -0.13, 0.145), Vector3(0.08, 0, 0), g, emission)
+			for y: float in [0.38, 0.33, 0.28]:
+				_add(_spine, _sphere_mesh(0.011, 6), GOLD, Vector3(0, y, -0.152), Vector3.ZERO, g, 0.4)
 		&"staff_vest", &"u_dealer_vest":
 			sleeve = SHIRT_WHITE
 			_shirt_v(SHIRT_WHITE, g)
@@ -788,6 +902,33 @@ func _build_bottom(id: StringName, c: Color) -> void:
 			emission = 0.4
 			for i in 2:
 				_add(_knees[i], _cyl_mesh(0.14, 0.15, 8, 0.09), c, Vector3(0, -SHIN_LEN + 0.07, 0), Vector3.ZERO, g, emission)
+		&"bell_bottoms":
+			_belt(Color("8a5a2b"), g)
+			for i in 2:
+				_add(_knees[i], _cyl_mesh(0.165, 0.17, 8, 0.1), c, Vector3(0, -SHIN_LEN + 0.075, 0), Vector3.ZERO, g)
+			_add(_legs[0], _sphere_mesh(0.045, 6), Color("ff8c1a"), Vector3(0.0, -0.2, -0.106), Vector3.ZERO, g, 0.0, Vector3(1.0, 1.0, 0.3))
+			_add(_legs[0], _sphere_mesh(0.018, 6), Color("ffe066"), Vector3(0.0, -0.2, -0.12), Vector3.ZERO, g)
+		&"tartan_kilt":
+			thigh = skin_color
+			shin = Color("efe6d2")
+			_add(_hips, _cyl_mesh(0.3, 0.36, 10, 0.235), c, Vector3(0, -0.1, 0), Vector3.ZERO, g)
+			for y: float in [-0.02, -0.17]:
+				_add(_hips, _cyl_mesh(0.282 - y * 0.1, 0.03, 10, 0.28 - y * 0.1), Color("c0392b"), Vector3(0, y, 0), Vector3.ZERO, g)
+			_add(_hips, _cyl_mesh(0.29, 0.012, 10), Color("ffd34d"), Vector3(0, -0.095, 0), Vector3.ZERO, g)
+			_add(_hips, _box_mesh(Vector3(0.12, 0.13, 0.05)), Color("5a3a22"), Vector3(0, -0.06, -0.27), Vector3.ZERO, g)
+			_add(_hips, _sphere_mesh(0.022, 6), Color("f5f5f0"), Vector3(0, -0.05, -0.3), Vector3.ZERO, g)
+			for i in 2:
+				_add(_knees[i], _box_mesh(Vector3(0.18, 0.04, 0.2)), Color("c0392b"), Vector3(0, -0.02, 0), Vector3.ZERO, g)
+		&"pinstripe_trousers":
+			_belt(Color("141414"), g)
+			var stripe := c.lightened(0.45)
+			for i in 2:
+				for x: float in [-0.06, 0.0, 0.06]:
+					_add(_legs[i], _box_mesh(Vector3(0.006, 0.42, 0.006)), stripe, Vector3(x, -0.2, -0.107), Vector3.ZERO, g)
+					_add(_knees[i], _box_mesh(Vector3(0.006, 0.34, 0.006)), stripe, Vector3(x, -0.18, -0.097), Vector3.ZERO, g)
+			for s: float in [-1.0, 1.0]:
+				_add(_spine, _box_mesh(Vector3(0.035, 0.5, 0.012)), Color("b3202a"), Vector3(s * 0.1, 0.24, -0.146), Vector3(0, 0, s * 0.05), g)
+				_add(_spine, _box_mesh(Vector3(0.035, 0.5, 0.012)), Color("b3202a"), Vector3(s * 0.1, 0.24, 0.146), Vector3(0, 0, s * 0.05), g)
 		&"staff_slacks":
 			for i in 2:
 				var s := -1.0 if i == 0 else 1.0
@@ -846,6 +987,30 @@ func _build_accessory(id: StringName, c: Color, g: int) -> void:
 			_add(hand, _box_mesh(Vector3(0.06, 0.22, 0.06)), c, Vector3(0, -FOREARM_LEN - 0.27, 0), Vector3.ZERO, g)
 			_add(hand, _box_mesh(Vector3(0.05, 0.06, 0.06)), c, Vector3(0, -FOREARM_LEN - 0.06, -0.08), Vector3.ZERO, g)
 			_add(hand, _box_mesh(Vector3(0.12, 0.04, 0.115)), Color("f5f5f5"), Vector3(0, -FOREARM_LEN - 0.12, 0), Vector3.ZERO, g)
+		&"fuzzy_dice":
+			_add(_spine, _box_mesh(Vector3(0.075, 0.075, 0.075)), c, Vector3(-0.045, 0.26, -0.2), Vector3(0.2, 0.3, 0.15), g)
+			_add(_spine, _box_mesh(Vector3(0.07, 0.07, 0.07)), Color("d7263d"), Vector3(0.05, 0.24, -0.2), Vector3(-0.15, -0.35, -0.2), g)
+			for s: float in [-1.0, 1.0]:
+				_add(_spine, _box_mesh(Vector3(0.012, 0.25, 0.012)), Color("222222"), Vector3(s * 0.06, 0.39, -0.153), Vector3(0, 0, -s * 0.45), g)
+			for p: Vector3 in [Vector3(-0.065, 0.278, -0.24), Vector3(-0.045, 0.258, -0.24), Vector3(-0.025, 0.238, -0.24)]:
+				_add(_spine, _sphere_mesh(0.009, 4), Color("111111"), p, Vector3.ZERO, g)
+			for p: Vector3 in [Vector3(0.035, 0.255, -0.238), Vector3(0.065, 0.225, -0.238)]:
+				_add(_spine, _sphere_mesh(0.009, 4), Color("f5f5f5"), p, Vector3.ZERO, g)
+		&"shoulder_parrot":
+			_add(_spine, _sphere_mesh(0.07, 8), c, Vector3(0.21, 0.57, 0.03), Vector3.ZERO, g, 0.0, Vector3(0.8, 1.15, 0.9))
+			_add(_spine, _sphere_mesh(0.048, 8), c, Vector3(0.21, 0.68, 0.0), Vector3.ZERO, g)
+			_add(_spine, _prism_mesh(Vector3(0.034, 0.05, 0.03)), Color("ffb000"), Vector3(0.21, 0.67, -0.055), Vector3(-PI * 0.5, 0, 0), g)
+			_add(_spine, _sphere_mesh(0.012, 4), Color("111111"), Vector3(0.235, 0.69, -0.025), Vector3.ZERO, g)
+			_add(_spine, _box_mesh(Vector3(0.025, 0.1, 0.07)), Color("d7263d"), Vector3(0.26, 0.56, 0.03), Vector3(0.2, 0, 0.15), g)
+			_add(_spine, _box_mesh(Vector3(0.04, 0.17, 0.018)), Color("2f80ed"), Vector3(0.21, 0.45, 0.1), Vector3(-0.35, 0, 0), g)
+			_add(_spine, _box_mesh(Vector3(0.03, 0.03, 0.06)), Color("8a5a2b"), Vector3(0.21, 0.505, 0.02), Vector3.ZERO, g)
+		&"velvet_cape":
+			_add(_spine, _box_mesh(Vector3(0.58, 0.98, 0.025)), c, Vector3(0, 0.02, 0.19), Vector3(-0.1, 0, 0), g)
+			_add(_spine, _box_mesh(Vector3(0.54, 0.94, 0.01)), Color("b3202a"), Vector3(0, 0.03, 0.172), Vector3(-0.1, 0, 0), g)
+			_add(_spine, _box_mesh(Vector3(0.4, 0.15, 0.022)), c.darkened(0.15), Vector3(0, 0.57, 0.16), Vector3(0.35, 0, 0), g)
+			for s: float in [-1.0, 1.0]:
+				_add(_spine, _sphere_mesh(0.024, 6), GOLD, Vector3(s * 0.08, 0.47, -0.15), Vector3.ZERO, g, 0.3)
+			_add(_spine, _box_mesh(Vector3(0.16, 0.01, 0.01)), GOLD, Vector3(0, 0.47, -0.16), Vector3.ZERO, g, 0.3)
 		&"staff_name_tag":
 			_add(_spine, _box_mesh(Vector3(0.11, 0.045, 0.015)), c, Vector3(-0.13, 0.36, -0.148), Vector3.ZERO, g, 0.2)
 			_add(_spine, _box_mesh(Vector3(0.08, 0.012, 0.01)), Color("f5f5f5"), Vector3(-0.13, 0.36, -0.157), Vector3.ZERO, g)
@@ -944,6 +1109,46 @@ func _pose_targets() -> void:
 			_t(J_SPINE, Vector3(-0.1, 0, 0))
 			_arms(Vector3(0.5, 0, -1.25), Vector3(0.5, 0, 1.25), 0.5, 0.5)
 			_legs_to(Vector3(1.05, 0, -0.1), Vector3(1.05, 0, 0.1), -1.75, -1.75)
+		&"wave", &"shrug", &"chip_flip", &"dance", &"bow":
+			_emote_targets(breath)
+
+
+func _emote_targets(breath: float) -> void:
+	match pose:
+		&"wave":
+			var swing := sin(_time * 10.0)
+			_t(J_SPINE, Vector3(0.02 * breath, 0, -0.05))
+			_t(J_NECK, Vector3(0.08, 0, 0.12))
+			_arms(Vector3(0.05, 0, -0.1), Vector3(0.12, 0, 2.5 + 0.35 * swing), 0.15, 0.35)
+		&"shrug":
+			var u := fmod(_pose_time, 1.4) / 1.4
+			var k := 0.5 - 0.5 * cos(TAU * u)
+			_t(J_NECK, Vector3(0.06, 0, 0.24 * k))
+			_t(J_SPINE, Vector3(0.03 * k, 0, 0))
+			_arms(Vector3(0.25, 0, -0.32 - 0.28 * k), Vector3(0.25, 0, 0.32 + 0.28 * k), 1.5, 1.5)
+			_target_offset.y = 0.025 * k
+		&"chip_flip":
+			var u := fmod(_pose_time, CHIP_FLIP_SECONDS) / CHIP_FLIP_SECONDS
+			var flight := clampf((u - 0.12) / 0.76, 0.0, 1.0)
+			var flick := 1.0 - smoothstep(0.0, 0.15, u)
+			_t(J_NECK, Vector3(0.05 + 0.35 * sin(PI * flight), 0, 0))
+			_t(J_SPINE, Vector3(0.02 * breath, 0, 0))
+			_arms(Vector3(-0.15, 0, -0.45), Vector3(0.75, 0, 0.12), 1.3, 1.3 + 0.35 * flick)
+		&"dance":
+			var b := sin(_time * 7.0)
+			_target_offset.y = -0.05 + 0.035 * cos(_time * 14.0)
+			_t(J_HIPS, Vector3(0, 0.22 * b, 0))
+			_t(J_SPINE, Vector3(0.04, -0.14 * b, 0.07 * b))
+			_t(J_NECK, Vector3(0.1, 0.1 * b, -0.06 * b))
+			_arms(Vector3(0.95, 0, -0.35), Vector3(0.2, 0, lerpf(0.5, 2.8, 0.5 + 0.5 * b)), 1.45, 0.15)
+			_legs_to(Vector3(0.2, 0, -0.08), Vector3(0.2, 0, 0.08), -0.38, -0.38)
+		&"bow":
+			var u := fmod(_pose_time, 2.0) / 2.0
+			var k := smoothstep(0.0, 0.3, u) * (1.0 - smoothstep(0.62, 0.92, u))
+			_t(J_SPINE, Vector3(-0.95 * k, 0, 0))
+			_t(J_NECK, Vector3(-0.25 * k, 0, 0))
+			_arms(Vector3(0.2, 0, -0.35 - 0.75 * k), Vector3(0.75, 0, -0.3), 0.2, 1.8)
+			_legs_to(Vector3(0.0, 0, -0.03), Vector3(-0.25 * k, 0, 0.03), 0.0, -0.15 * k)
 
 
 func _locomotion(breath: float) -> void:

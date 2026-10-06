@@ -1,7 +1,9 @@
 class_name VisitBanner
 extends Control
 ## The big animated card between visits: thrown out (from -> to casino),
-## climbed, a curb timeout at Sal's, or the end-of-run summary with the score.
+## climbed, a curb timeout at Sal's, or the end-of-run summary with the score,
+## its rank on the local leaderboard for the crew size and the run's new
+## cosmetic unlocks.
 ## Listens for &"thrown_out", &"climbed" and &"curb" itself. Visit cards close
 ## after Tuning.UI_VISIT_BANNER_SECONDS or on Continue (Space / Enter); the run
 ## summary waits for its button.
@@ -23,6 +25,10 @@ var card: PanelContainer
 var title_label: Label
 var route_label: Label
 var detail_label: Label
+## Run summary: the leaderboard line (rank, or why it wasn't posted).
+var rank_label: Label
+## Run summary: unlocks earned this run (hidden when none).
+var unlocks_label: Label
 var continue_button: Button
 
 var _left: float = 0.0
@@ -69,11 +75,15 @@ func show_curb(seconds: float) -> void:
 
 
 ## End of run. `stats` keys (all optional): score, top_banked, top_seconds,
-## elapsed_seconds, visits, rung. Defaults to the host's run.
+## elapsed_seconds, visits, rung (the run's numbers; without any of them the
+## host's run is used), and from main.gd's profile: rank (1-based on the
+## local board, 0 = not in the top), crew_size, practice (not posted),
+## unlocks (ids unlocked this run).
 func show_run_summary(stats: Dictionary = {}) -> void:
 	var s: Dictionary = stats
-	if s.is_empty() and host != null:
-		s = host.snapshot().get("run", {})
+	if not s.has("score") and host != null:
+		s = host.snapshot().get("run", {}).duplicate()
+		s.merge(stats, true)
 	var lines: PackedStringArray = []
 	lines.append("Banked at The Apex: %s" % UiTheme.chips(int(s.get("top_banked", 0))))
 	lines.append("Time at the top: %s" % UiTheme.clock(float(s.get("top_seconds", 0.0))))
@@ -81,6 +91,28 @@ func show_run_summary(stats: Dictionary = {}) -> void:
 	_show(KIND_SUMMARY, "RUN OVER", UiTheme.GOLD,
 		"SCORE  %s" % UiTheme.chips(int(s.get("score", 0))), "\n".join(lines), false)
 	continue_button.text = "BACK TO TITLE"
+	rank_label.text = rank_text(s)
+	rank_label.visible = rank_label.text != ""
+	var unlocked: PackedStringArray = []
+	for id: Variant in s.get("unlocks", []):
+		unlocked.append(Unlocks.display_name(StringName(str(id))))
+	unlocks_label.text = "NEW UNLOCKS: %s" % ", ".join(unlocked) if not unlocked.is_empty() else ""
+	unlocks_label.visible = not unlocked.is_empty()
+
+
+## The leaderboard line of a run summary ("" without rank info).
+static func rank_text(s: Dictionary) -> String:
+	if bool(s.get("practice", false)):
+		return "Practice run: not posted to the leaderboard."
+	if not s.has("rank"):
+		return ""
+	var board := LeaderboardPanel.crew_name(int(s.get("crew_size", 1))).to_lower()
+	var rank := int(s.get("rank", 0))
+	if rank <= 0:
+		return "Not in your %s top %d this time." % [board, Profile.LEADERBOARD_SIZE]
+	if rank == 1:
+		return "NEW BEST!  #1 on your %s leaderboard." % board
+	return "#%d on your %s leaderboard." % [rank, board]
 
 
 func dismiss() -> void:
@@ -150,6 +182,8 @@ func _show(p_kind: StringName, title: String, color: Color, route: String, detai
 	route_label.text = route
 	detail_label.text = detail
 	continue_button.text = "CONTINUE  [Space]"
+	rank_label.visible = false
+	unlocks_label.visible = false
 	_left = Tuning.UI_VISIT_BANNER_SECONDS if auto_close else 0.0
 	_shown = 0.0
 	card.add_theme_stylebox_override(&"panel", _card_box(color))
@@ -196,6 +230,15 @@ func _build() -> void:
 	detail_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	detail_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	v.add_child(detail_label)
+	rank_label = UiTheme.make_label("", &"BigLabel", 30, UiTheme.GOLD_LIGHT)
+	rank_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	rank_label.visible = false
+	v.add_child(rank_label)
+	unlocks_label = UiTheme.make_label("", &"BigLabel", 26, UiTheme.WIN_COLOR)
+	unlocks_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	unlocks_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	unlocks_label.visible = false
+	v.add_child(unlocks_label)
 	continue_button = UiTheme.make_button("CONTINUE  [Space]", &"", Vector2(360, 64))
 	continue_button.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
 	continue_button.add_theme_font_size_override(&"font_size", 28)

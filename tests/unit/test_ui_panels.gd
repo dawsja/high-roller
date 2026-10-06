@@ -22,6 +22,10 @@ func _host(rung: int = 3, crew: Dictionary = {1: "Ace"}) -> SimHost:
 	host.start_run(rung, 42, crew)
 	host.start_visit()
 	host.paused = true
+	# Panels are tested with the Apex starting pocket (more than this casino's max bet).
+	for pid: int in crew:
+		var wallet: Wallet = host.sim.player(pid).wallet
+		wallet.add(Tuning.START_CHIPS - wallet.pocket)
 	host.request_register_table(&"slots_1", HR.GameType.SLOTS, &"slots_a")
 	host.request_register_table(&"hl_1", HR.GameType.HIGH_LOW, &"tables_a")
 	host.request_register_table(&"bj_1", HR.GameType.BLACKJACK, &"tables_a")
@@ -561,6 +565,7 @@ func test_visit_banner_thrown_out_and_summary() -> void:
 		host.request_reach_back_room(1)
 		if i < Tuning.STRIKES_TO_THROW_OUT - 1:
 			host.sim.tick(Tuning.BACK_ROOM_TIMEOUT + 0.1)
+			host.sim.player(1).rejoin_grace = 0.0  # skip the after-rejoin grace (broke crew: no time to wait)
 	assert_true(host.sim.finished)
 	assert_true(banner.is_open())
 	assert_eq(banner.kind, VisitBanner.KIND_THROWN_OUT)
@@ -589,6 +594,7 @@ func test_visit_banner_curb_at_sals() -> void:
 		host.request_reach_back_room(1)
 		if i < Tuning.STRIKES_TO_THROW_OUT - 1:
 			host.sim.tick(Tuning.BACK_ROOM_TIMEOUT + 0.1)
+			host.sim.player(1).rejoin_grace = 0.0  # skip the after-rejoin grace
 	assert_eq(banner.kind, VisitBanner.KIND_CURB)
 	assert_true(banner.title_label.text.contains("CURB"))
 

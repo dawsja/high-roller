@@ -6,7 +6,9 @@ extends Control
 ## three big answers (keys 1 / 2 / 3) before the timer bar runs out
 ## (request_answer_id_check / request_expire_id_check). An auto-fail (no card,
 ## burned, flagged, spotted cheap fake) shows its reason. The pass/fail result
-## stays up for Tuning.UI_QUIZ_RESULT_SECONDS, then the panel closes.
+## stays up for Tuning.UI_QUIZ_RESULT_SECONDS, then the panel closes (at once
+## if this player is grabbed or the visit ends). The answer's result arrives
+## as host.request_done (or the &"id_result" event).
 
 signal answered(passed: bool)
 signal closed()
@@ -41,10 +43,12 @@ func _init() -> void:
 func setup(p_host: SimHost, p_pid: int) -> void:
 	if host != null and host.sim_event.is_connected(_on_sim_event):
 		host.sim_event.disconnect(_on_sim_event)
+		host.request_done.disconnect(_on_request_done)
 	host = p_host
 	pid = p_pid
 	if host != null:
 		host.sim_event.connect(_on_sim_event)
+		host.request_done.connect(_on_request_done)
 
 
 ## Opens the quiz. `data` is the &"id_check" event data ({auto_fail,
@@ -111,8 +115,15 @@ func answer(index: int) -> void:
 	if index < 0 or index >= options.size():
 		return
 	_answering = true
-	var res: Dictionary = host.request_answer_id_check(pid, index)
+	host.request_answer_id_check(pid, index)
+
+
+func _on_request_done(request: StringName, args: Array, res: Dictionary) -> void:
+	if request != &"answer_id_check" or args.size() < 2 or int(args[0]) != pid:
+		return
 	_answering = false
+	if not visible:
+		return
 	if not bool(res.get("ok", false)):
 		if _result_left <= 0.0:
 			_show_result(false, StringName(str(res.get("reason", ""))))
@@ -120,7 +131,7 @@ func answer(index: int) -> void:
 	var passed: bool = bool(res.get("passed", false))
 	if _result_left <= 0.0:
 		_show_result(passed, FloorSim.ID_CORRECT if passed else FloorSim.ID_WRONG)
-	_mark_choice(index, passed)
+	_mark_choice(int(args[1]), passed)
 
 
 ## The timer ran out.
@@ -199,9 +210,10 @@ func advance(delta: float) -> void:
 
 
 func _on_sim_event(kind: StringName, data: Dictionary) -> void:
-	# Grabbed or the crew left: the sim dropped the check without an id_result.
+	# Grabbed or the crew left: the sim dropped any check without an id_result,
+	# and a result card still up (a failed check, then the grab) goes too.
 	if UiTheme.ends_panel(kind, data, pid):
-		if visible and _result_left <= 0.0:
+		if visible:
 			close()
 		return
 	if int(data.get("pid", -1)) != pid:
@@ -210,6 +222,7 @@ func _on_sim_event(kind: StringName, data: Dictionary) -> void:
 		&"id_check":
 			open_check(data)
 		&"id_result":
+			_answering = false
 			# Our answer, our timeout or the sim's own timeout: show it once.
 			if visible and _result_left <= 0.0:
 				_show_result(bool(data.get("passed", false)), StringName(str(data.get("reason", ""))))

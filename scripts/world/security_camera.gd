@@ -7,6 +7,9 @@ extends Node3D
 ## the lens to the chest) is drawn as a fan on the floor. World-side only: it
 ## reports through signals (the director sets in_camera_view and reports
 ## sightings); it never changes Heat itself.
+##
+## Co-op: cameras look only on the host; enable_net_sync() sends the sweep and
+## the watching light, and a client's `puppet` camera just shows them.
 
 ## A player entered (true) or left (false) the view. Drives in_camera_view.
 signal watching(camera: SecurityCamera, pid: int, active: bool)
@@ -23,6 +26,7 @@ const CONE_IDLE := Color(0.55, 0.8, 1.0, 0.16)
 const CONE_WATCHING := Color(1.0, 0.15, 0.1, 0.26)
 ## Lens distance in front of the pivot along the view.
 const LENS_FORWARD := 0.32
+const NET_SYNC_INTERVAL := 1.0 / 20.0
 
 var camera_id: int = -1
 var vision_cone: VisionCone
@@ -30,6 +34,11 @@ var vision_cone: VisionCone
 var sweep_yaw: float = 0.0
 ## Height of the floor the fan is drawn on.
 var floor_y: float = 0.0
+## Co-op client copy: shows the host's sweep and light, never looks itself.
+var puppet: bool = false
+# Synced from the host (see enable_net_sync()).
+var net_yaw: float = 0.0
+var net_watching: bool = false
 
 var _players_provider: Callable
 var _pivot: Node3D
@@ -41,6 +50,7 @@ var _watched: Dictionary = {}
 var _spot_cooldowns: Dictionary = {}
 var _time: float = 0.0
 var _cone_timer: float = 0.0
+var _net_sync: bool = false
 
 
 func _init() -> void:
@@ -104,6 +114,14 @@ func setup(id: int, mount: Transform3D, players_provider: Callable) -> void:
 	_pivot.rotation = Vector3(0, sweep_yaw, 0)
 
 
+## Adds the MultiplayerSynchronizer for the sweep and the light (the host
+## sends, a client's puppet applies; both sides need it).
+func enable_net_sync() -> void:
+	_net_sync = true
+	net_yaw = sweep_yaw
+	NetSync.attach(self, [&"net_yaw"], [&"net_watching"], NET_SYNC_INTERVAL)
+
+
 ## pids in view right now.
 func watched_pids() -> Array[int]:
 	var out: Array[int] = []
@@ -129,6 +147,11 @@ func view_direction() -> Vector3:
 
 
 func _physics_process(delta: float) -> void:
+	if puppet:
+		sweep_yaw = lerp_angle(sweep_yaw, net_yaw, 1.0 - exp(-16.0 * delta))
+		_pivot.rotation = Vector3(0, sweep_yaw, 0)
+		_update_visuals(delta)
+		return
 	_time += delta
 	var players := _query_players()
 	_update_sweep(delta, players)
@@ -146,6 +169,9 @@ func _physics_process(delta: float) -> void:
 			_spot_cooldowns[pid] = _time + Tuning.CAMERA_SPOT_COOLDOWN
 			spotted.emit(self, pid)
 	_update_visuals(delta)
+	if _net_sync:
+		net_yaw = sweep_yaw
+		net_watching = not _watched.is_empty()
 
 
 func _exit_tree() -> void:
@@ -217,7 +243,7 @@ func _sweep_target() -> float:
 
 
 func _update_visuals(delta: float) -> void:
-	var on := not _watched.is_empty()
+	var on := net_watching if puppet else not _watched.is_empty()
 	_light_on.visible = on
 	_light_off.visible = not on
 	vision_cone.set_color(CONE_WATCHING if on else CONE_IDLE)

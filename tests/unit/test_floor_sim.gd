@@ -326,14 +326,20 @@ func test_pit_boss_multiplies_gains() -> void:
 
 func test_throw_loses_and_cools() -> void:
 	var sim := _sim()
+	_rich(sim, 1)
 	_seat(sim, 1, HR.GameType.SLOTS)
 	var ps := sim.player(1)
 	ps.heat.add(20.0, &"test")
-	var r := sim.place_bet(1, &"t1", _min_bet(sim), {"throw": true})
+	var r := sim.place_bet(1, &"t1", _max_bet(sim), {"throw": true})
 	assert_false(r["result"]["won"])
 	assert_true(r["result"]["intentional_loss"])
-	assert_almost_eq(ps.heat.value, 20.0 + Tuning.LOSE_ON_PURPOSE_HEAT)
+	assert_almost_eq(ps.heat.value, 20.0 + Tuning.LOSE_ON_PURPOSE_HEAT, 0.001, "a max-bet throw cools the full amount")
 	assert_eq(_heat_events(HeatRules.LOSE_ON_PURPOSE).size(), 1)
+	# A min-bet throw cools in proportion: big wins can't be laundered cheaply.
+	sim.place_bet(1, &"t1", _min_bet(sim), {"throw": true})
+	var cooled: float = HeatRules.lose_on_purpose_heat(_min_bet(sim), _max_bet(sim))
+	assert_almost_eq(ps.heat.value, 20.0 + Tuning.LOSE_ON_PURPOSE_HEAT + cooled)
+	assert_gt(cooled, Tuning.LOSE_ON_PURPOSE_HEAT)
 
 
 func test_dice_solo_is_a_shared_roll() -> void:
@@ -389,7 +395,7 @@ func test_big_wheel_makes_noise_at_the_table() -> void:
 func test_watched_while_seated_swaps_dealer_once() -> void:
 	var sim := _sim()
 	var t := _seat(sim, 1, HR.GameType.ROULETTE)
-	sim.player(1).heat.add(Tuning.WATCHED_AT + 1.0, &"test")
+	sim.player(1).heat.add(Tuning.WATCHED_AT + 1.0, HeatRules.WIN)
 	assert_true(t.is_cooled(1))
 	assert_almost_eq(t.win_rate_for(1), Tuning.COOLED_WIN_RATE)
 	var swaps := _events(&"dealer_swap")
@@ -398,6 +404,51 @@ func test_watched_while_seated_swaps_dealer_once() -> void:
 	assert_eq(_events(&"level")[0]["new"], HR.HeatLevel.WATCHED)
 	# Higher levels don't swap again.
 	sim.player(1).heat.add(30.0, &"test")
+	assert_eq(_events(&"dealer_swap").size(), 1)
+
+
+func test_winning_into_watched_at_a_table_swaps_its_dealer() -> void:
+	var sim := _sim()
+	_rich(sim, 1)
+	var t := _seat(sim, 1, HR.GameType.ROULETTE)
+	var red := {"kind": "color", "color": "red"}
+	for i in 30:
+		_bet_until(sim, 1, &"t1", _max_bet(sim), true, red)
+		if sim.player(1).level() >= HR.HeatLevel.WATCHED:
+			break
+	assert_eq(sim.player(1).level(), HR.HeatLevel.WATCHED)
+	assert_true(t.is_cooled(1), "won into Watched here")
+	assert_eq(_events(&"dealer_swap"), [{"pid": 1, "table_id": &"t1"}])
+
+
+func test_table_jump_into_watched_does_not_swap_the_new_dealer() -> void:
+	var sim := _sim()
+	_seat(sim, 1, HR.GameType.ROULETTE, &"a")
+	var b := sim.register_table(&"b", HR.GameType.ROULETTE, &"a1")
+	sim.player(1).heat.add(Tuning.WATCHED_AT - 1.0, &"test")
+	sim.stand(1)
+	var r := sim.sit(1, &"b", true)
+	assert_almost_eq(r["heat"], Tuning.TABLE_JUMP_HEAT)
+	assert_eq(sim.player(1).level(), HR.HeatLevel.WATCHED, "the jump crossed Watched")
+	assert_false(b.is_cooled(1), "but the new dealer stays")
+	assert_almost_eq(b.win_rate_for(1), Tuning.WIN_RATE)
+	assert_eq(_events(&"dealer_swap").size(), 0)
+
+
+func test_passive_or_poster_heat_into_watched_while_seated_does_not_swap() -> void:
+	var sim := _sim()
+	var t := _seat(sim, 1, HR.GameType.ROULETTE)
+	sim.player(1).heat.add(Tuning.WATCHED_AT - 1.0, &"test")
+	sim.player(1).heat.add(2.0, HeatRules.POSTER_MATCH)
+	assert_eq(sim.player(1).level(), HR.HeatLevel.WATCHED)
+	assert_false(t.is_cooled(1))
+	sim.player(1).heat.add(-5.0, &"test")
+	sim.player(1).heat.add(5.0, HeatRules.CAMERA)
+	assert_false(t.is_cooled(1))
+	# Camping at this table is playing it: that swaps.
+	sim.player(1).heat.add(-5.0, &"test")
+	sim.player(1).heat.add(5.0, HeatRules.CAMPING)
+	assert_true(t.is_cooled(1))
 	assert_eq(_events(&"dealer_swap").size(), 1)
 
 
@@ -557,7 +608,7 @@ func test_high_low_throw_cools() -> void:
 	var g := sim.high_low_guess(1, true, true)
 	assert_false(g["won"])
 	assert_true(g["finished"])
-	assert_almost_eq(ps.heat.value, 20.0 + Tuning.LOSE_ON_PURPOSE_HEAT)
+	assert_almost_eq(ps.heat.value, 20.0 + HeatRules.lose_on_purpose_heat(_min_bet(sim), _max_bet(sim)))
 
 
 func test_blackjack_wrappers_apply_once() -> void:
@@ -600,7 +651,7 @@ func test_blackjack_hit_past_21_is_a_thrown_hand() -> void:
 	assert_null(ps.blackjack)
 	assert_eq(_events(&"bet").size(), 1)
 	if h["result"]["intentional_loss"]:
-		assert_almost_eq(ps.heat.value, 20.0 + Tuning.LOSE_ON_PURPOSE_HEAT)
+		assert_almost_eq(ps.heat.value, 20.0 + HeatRules.lose_on_purpose_heat(_min_bet(sim), _max_bet(sim)))
 
 
 func test_stand_settles_round_in_progress() -> void:
@@ -790,7 +841,11 @@ func test_id_check_quiz() -> void:
 	assert_eq(ps.status, HR.PlayerStatus.SEATED, "back to the table")
 	assert_eq(_events(&"id_result")[0], {"pid": 1, "guard_id": 4, "passed": true, "reason": FloorSim.ID_CORRECT})
 	assert_eq(sim.answer_id_check(1, correct)["reason"], FloorSim.NO_QUESTION)
+	assert_true(ps.id_cleared(), "a passed check clears them crew-wide")
 	sim.stand(1)
+	assert_eq(sim.start_id_check(1)["reason"], FloorSim.CLEARED, "no second check back to back")
+	ps.heat.add(Tuning.WATCHED_AT, &"test")
+	assert_false(ps.id_cleared(), "drew new attention")
 	sim.start_id_check(1)
 	var wrong: int = (int(ps.id_question["correct_index"]) + 1) % Tuning.ID_QUIZ_OPTIONS
 	assert_false(sim.answer_id_check(1, wrong)["passed"])
@@ -839,7 +894,8 @@ func test_id_check_auto_fails() -> void:
 			assert_eq(c["fail_reason"], FloorSim.ID_SPOTTED)
 			spotted += 1
 		else:
-			sim.answer_id_check(1, 0)
+			# A wrong answer, so the player never ends up cleared.
+			sim.answer_id_check(1, (int(ps.id_question["correct_index"]) + 1) % Tuning.ID_QUIZ_OPTIONS)
 	assert_between(spotted, 1, 30)
 
 
@@ -964,10 +1020,12 @@ func test_back_room_detains_and_rejoins() -> void:
 	var ps := sim.player(1)
 	ps.heat.add(60.0, &"test")
 	var card := ps.current_id()
+	var pocket := ps.wallet.pocket
+	assert_eq(pocket, CasinoLadder.start_chips(TOP + 1))
 	sim.caught(1)
 	var r := sim.reach_back_room(1)
 	assert_true(r["ok"])
-	assert_eq(r["chips_lost"], Tuning.START_CHIPS)
+	assert_eq(r["chips_lost"], pocket)
 	assert_eq(r["strikes"], 1)
 	assert_false(r["thrown_out"])
 	assert_false(r["curb"])
@@ -977,7 +1035,7 @@ func test_back_room_detains_and_rejoins() -> void:
 	assert_almost_eq(ps.heat.value, 0.0)
 	assert_eq(sim.run.strikes, 1)
 	assert_eq(_events(&"strike")[0]["strikes"], 1)
-	assert_eq(_events(&"detained")[0]["chips_lost"], Tuning.START_CHIPS)
+	assert_eq(_events(&"detained")[0]["chips_lost"], pocket)
 	assert_true(_events(&"detained")[0]["id_burned"])
 	assert_eq(sim.reach_back_room(1)["reason"], FloorSim.NOT_CARRIED)
 	assert_eq(sim.caught(1)["reason"], FloorSim.NOT_AVAILABLE)
@@ -988,6 +1046,10 @@ func test_back_room_detains_and_rejoins() -> void:
 	var rejoined := _events(&"rejoined")
 	assert_eq(rejoined.size(), 1)
 	assert_true(rejoined[0]["new_id"])
+	assert_eq(rejoined[0]["from"], &"back_room")
+	assert_eq(rejoined[0]["spawn"], &"entrance", "back in at the entrance, not outside the security office")
+	assert_eq(ps.zone, HR.ZoneType.ENTRANCE)
+	assert_almost_eq(ps.heat.value, 0.0, 0.001, "processed: Heat 0")
 	assert_eq(ps.ids.size(), 2)
 	assert_eq(ps.current_id().grade, Tuning.REJOIN_ID_GRADE)
 	assert_true(ps.current_id().passes_check())
@@ -1007,12 +1069,15 @@ func test_rejoin_switches_to_a_held_card() -> void:
 
 func test_three_strikes_throw_out() -> void:
 	var sim := _sim(TOP + 1)
+	sim.run.bank = 1000  # not broke after losing the pocket, so only strikes count
 	for i in Tuning.STRIKES_TO_THROW_OUT:
 		assert_true(sim.caught(1)["ok"])
 		var r := sim.reach_back_room(1)
 		if i < Tuning.STRIKES_TO_THROW_OUT - 1:
 			assert_false(r["thrown_out"])
 			sim.tick(Tuning.BACK_ROOM_TIMEOUT + 0.1)
+			assert_eq(sim.caught(1)["reason"], FloorSim.NOT_AVAILABLE, "rejoin grace")
+			sim.tick(Tuning.REJOIN_GRACE_SECONDS + 0.1)
 		else:
 			assert_true(r["thrown_out"])
 	assert_true(sim.finished)
@@ -1061,6 +1126,8 @@ func test_sals_curb_timeout() -> void:
 func test_cash_out() -> void:
 	var sim := _sim(TOP + 2)
 	var ps := sim.player(1)
+	_rich(sim, 1, 1000)
+	var start := ps.wallet.pocket
 	assert_eq(sim.cash_out(1, 100)["reason"], FloorSim.WRONG_ZONE)
 	sim.enter_zone(1, HR.ZoneType.CASHIER, &"cage")
 	assert_eq(sim.cash_out(1, -5)["reason"], Cashier.BAD_AMOUNT)
@@ -1070,7 +1137,7 @@ func test_cash_out() -> void:
 	assert_eq(r["banked"], 1000)
 	assert_eq(sim.run.bank, 1000)
 	assert_eq(r["bank"], 1000)
-	assert_eq(ps.wallet.pocket, Tuning.START_CHIPS - 1000)
+	assert_eq(ps.wallet.pocket, start - 1000)
 	assert_eq(_events(&"banked")[0]["amount"], 1000)
 	# Large cash-out Heat (max bet 500 at rung 3: 1000 is under 10 bets).
 	assert_almost_eq(r["heat"], 0.0)
@@ -1084,6 +1151,7 @@ func test_cash_out() -> void:
 func test_withdraw_takes_chips_back_out_of_the_bank() -> void:
 	var sim := _sim(TOP + 2)
 	var ps := sim.player(1)
+	var start := ps.wallet.pocket
 	sim.run.bank = 300
 	assert_eq(sim.withdraw(1, 100)["reason"], FloorSim.WRONG_ZONE)
 	sim.enter_zone(1, HR.ZoneType.CASHIER, &"cage")
@@ -1096,7 +1164,7 @@ func test_withdraw_takes_chips_back_out_of_the_bank() -> void:
 	assert_eq(r["amount"], 120)
 	assert_eq(r["bank"], 180)
 	assert_eq(sim.run.bank, 180)
-	assert_eq(ps.wallet.pocket, Tuning.START_CHIPS + 120)
+	assert_eq(ps.wallet.pocket, start + 120)
 	assert_eq(r["pocket"], ps.wallet.pocket)
 	assert_eq(_events(&"withdrawn"), [{"pid": 1, "amount": 120, "bank": 180}])
 	assert_eq(_events(&"chips").back()["delta"], 120)
@@ -1176,7 +1244,8 @@ func test_broke_countdown_waits_for_the_crew_to_be_back_on_the_floor() -> void:
 	assert_eq(sim.player(1).status, HR.PlayerStatus.FREE, "rejoined, broke")
 	assert_false(sim.finished, "no countdown while detained, and the warning comes first")
 	assert_eq(_events(&"notify").filter(func(d: Dictionary) -> bool: return d["kind"] == &"broke").size(), 1)
-	sim.caught(1)
+	sim.player(1).rejoin_grace = 0.0  # skip the after-rejoin grace: grabbed mid-countdown
+	assert_true(sim.caught(1)["ok"])
 	sim.tick(Tuning.BROKE_GRACE_SECONDS * 2.0)
 	assert_false(sim.finished, "carried: the countdown stopped")
 
@@ -1356,6 +1425,366 @@ func test_forger_moves() -> void:
 	assert_eq(sim.snapshot()["forger_location"], sim.forger.location())
 
 
+# --- Playtest rules: loitering, scoring, rejoin grace, crew-wide ID clearance ----
+
+func test_add_player_uses_the_casinos_start_chips() -> void:
+	for rung in range(TOP, BOTTOM + 1):
+		var sim := _sim(rung)
+		assert_eq(sim.player(1).wallet.pocket, int(Tuning.CASINOS[rung - TOP]["start_chips"]), "rung %d" % rung)
+		assert_eq(sim.player(1).wallet.pocket, CasinoLadder.start_chips(rung))
+	assert_eq(CasinoLadder.start_chips(TOP), Tuning.START_CHIPS)
+	assert_eq(CasinoLadder.start_chips(99), Tuning.START_CHIPS, "fallback")
+	# Bottom rungs start small enough to need a real climb.
+	assert_lte(CasinoLadder.start_chips(BOTTOM), CasinoLadder.buy_in_to_leave(BOTTOM) / 2)
+
+
+func test_loitering_off_the_tables_builds_heat_after_the_grace() -> void:
+	var sim := _sim()
+	var ps := sim.player(1)
+	sim.enter_zone(1, HR.ZoneType.BAR, &"bar")
+	ps.heat.add(50.0, &"test")
+	sim.tick(Tuning.LOITER_GRACE_SECONDS - 1.0)
+	assert_eq(_heat_events(HeatRules.LOITERING).size(), 0)
+	assert_lt(ps.heat.value, 50.0, "cooling off at the bar inside the grace")
+	assert_false(ps.is_loitering())
+	var before := ps.heat.value
+	log.clear()
+	for i in 20:
+		sim.tick(0.5)
+	assert_true(ps.is_loitering())
+	assert_gt(_heat_events(HeatRules.LOITERING).size(), 0)
+	assert_gt(ps.heat.value, before, "security notices someone who isn't playing")
+	log.clear()
+	sim.tick(0.5)
+	assert_eq(_heat_events(HeatRules.OFF_TABLE).size(), 0, "the bar stopped cooling once loitering started")
+	assert_eq(_heat_events(HeatRules.LOITERING).size(), 1)
+	assert_true(sim.snapshot()["players"][1]["loitering"])
+
+
+func test_sitting_and_betting_reset_loitering_once_per_play() -> void:
+	var sim := _sim()
+	var ps := sim.player(1)
+	sim.register_table(&"s1", HR.GameType.SLOTS, &"slots")
+	sim.register_table(&"s2", HR.GameType.SLOTS, &"slots")
+	sim.tick(Tuning.LOITER_GRACE_SECONDS + 5.0)
+	assert_true(ps.is_loitering())
+	sim.sit(1, &"s1")
+	assert_almost_eq(ps.loiter_seconds, 0.0, 0.001, "sitting down resets it")
+	sim.tick(Tuning.LOITER_GRACE_SECONDS + 1.0)
+	assert_true(ps.is_loitering(), "sitting at a slot without playing")
+	log.clear()
+	sim.tick(1.0)
+	assert_eq(_heat_events(HeatRules.SLOT_BLEND).size(), 0, "no blending in without playing")
+	assert_eq(_heat_events(HeatRules.LOITERING).size(), 1)
+	sim.stand(1)
+	sim.sit(1, &"s2")
+	assert_true(ps.is_loitering(), "standing up and sitting again doesn't reset it a second time")
+	assert_true(sim.place_bet(1, &"s2", _min_bet(sim))["ok"])
+	assert_almost_eq(ps.loiter_seconds, 0.0, 0.001, "a bet resets it")
+	log.clear()
+	sim.tick(1.0)
+	assert_eq(_heat_events(HeatRules.SLOT_BLEND).size(), 1, "playing slots blends in again")
+	sim.stand(1)
+	sim.tick(10.0)
+	sim.sit(1, &"s1")
+	assert_almost_eq(ps.loiter_seconds, 0.0, 0.001, "after a bet the next sit resets it again")
+
+
+func test_rounds_count_as_play() -> void:
+	var sim := _sim(TOP + 2)
+	var ps := sim.player(1)
+	_seat(sim, 1, HR.GameType.HIGH_LOW, &"hl")
+	sim.tick(20.0)
+	sim.start_high_low(1, &"hl", _min_bet(sim))
+	assert_almost_eq(ps.loiter_seconds, 0.0)
+	sim.tick(20.0)
+	sim.high_low_guess(1, true)
+	assert_almost_eq(ps.loiter_seconds, 0.0, 0.001, "a guess is play")
+
+
+func test_waiting_at_the_exit_below_the_top_is_not_loitering() -> void:
+	var sim := _sim(TOP + 2)
+	sim.enter_zone(1, HR.ZoneType.EXIT, &"door")
+	sim.tick(Tuning.LOITER_GRACE_SECONDS * 3.0)
+	assert_false(sim.player(1).is_loitering(), "waiting for the crew to climb")
+	var top := _sim(TOP)
+	top.enter_zone(1, HR.ZoneType.EXIT, &"door")
+	top.tick(Tuning.LOITER_GRACE_SECONDS + 1.0)
+	assert_true(top.player(1).is_loitering(), "at the top the exit is no place to farm time")
+
+
+func test_top_seconds_only_count_while_the_crew_can_play() -> void:
+	var sim := _sim(TOP, 1, 2)
+	sim.tick(10.0)
+	assert_almost_eq(sim.run.top_seconds, 10.0)
+	assert_true(sim.snapshot()["run"]["scoring"])
+	# Whole crew held: one carried still counts, all detained doesn't.
+	sim.run.bank = 0
+	for pid in [1, 2]:
+		sim.player(pid).wallet.add(100000)
+	sim.caught(1)
+	sim.tick(1.0)
+	assert_almost_eq(sim.run.top_seconds, 11.0, 0.001, "one carried, one on the floor")
+	sim.reach_back_room(1)
+	sim.caught(2)
+	assert_true(sim.finished or sim.player(2).status == HR.PlayerStatus.CARRIED)
+	# A solo crew in the back room scores nothing while held.
+	var solo := _sim(TOP)
+	solo.caught(1)
+	solo.reach_back_room(1)
+	solo.tick(Tuning.BACK_ROOM_TIMEOUT - 1.0)
+	assert_almost_eq(solo.run.top_seconds, 0.0, 0.001, "detained: no score for time")
+	assert_false(solo.snapshot()["run"]["scoring"])
+
+
+func test_a_broke_crew_at_the_top_scores_no_time() -> void:
+	var sim := _sim(TOP)
+	var ps := sim.player(1)
+	ps.wallet.spend(ps.wallet.pocket - (_min_bet(sim) - 1))
+	sim.tick(120.0)
+	assert_almost_eq(sim.run.top_seconds, 0.0, 0.001, "idling broke at the top farms nothing")
+	assert_eq(sim.score(), 0)
+	sim.run.bank = _min_bet(sim)
+	sim.tick(60.0)
+	assert_almost_eq(sim.run.top_seconds, 60.0, 0.001, "chips in the bank to withdraw: still in the game")
+	sim.run.bank = 0
+	ps.wallet.add(1)
+	sim.tick(1.0)
+	assert_almost_eq(sim.run.top_seconds, 61.0, 0.001, "a pocket covering the min bet")
+
+
+func test_rejoin_grace_keeps_guards_off_then_ends() -> void:
+	var sim := _sim(TOP + 1)
+	sim.run.bank = 1000
+	var ps := sim.player(1)
+	sim.caught(1)
+	sim.reach_back_room(1)
+	sim.tick(Tuning.BACK_ROOM_TIMEOUT + 0.1)
+	assert_eq(ps.status, HR.PlayerStatus.FREE)
+	assert_true(ps.is_available())
+	assert_false(ps.is_targetable(), "just processed: guards leave them alone")
+	assert_almost_eq(ps.rejoin_grace, Tuning.REJOIN_GRACE_SECONDS)
+	assert_eq(_events(&"rejoined")[0]["grace"], Tuning.REJOIN_GRACE_SECONDS)
+	assert_false(sim.snapshot()["players"][1]["targetable"])
+	assert_eq(sim.caught(1)["reason"], FloorSim.NOT_AVAILABLE)
+	assert_eq(sim.start_id_check(1)["reason"], FloorSim.NOT_AVAILABLE)
+	# Their look on a poster adds no Heat during the grace.
+	sim.run.posters.print_poster(sim.run.casino_id(), 1, ps.outfit)
+	var seen := sim.report_seen(1, {"guard_id": 2})
+	assert_true(seen["matches_poster"])
+	assert_almost_eq(seen["heat"], 0.0)
+	sim.tick(Tuning.REJOIN_GRACE_SECONDS)
+	assert_true(ps.is_targetable(), "grace over")
+	assert_true(sim.caught(1)["ok"])
+
+
+func test_rejoin_grace_ends_early_on_sitting_or_reaching_watched() -> void:
+	var sim := _sim(TOP + 1)
+	sim.run.bank = 1000
+	var ps := sim.player(1)
+	sim.register_table(&"t1", HR.GameType.ROULETTE, &"a")
+	sim.caught(1)
+	sim.reach_back_room(1)
+	sim.tick(Tuning.BACK_ROOM_TIMEOUT + 0.1)
+	assert_false(ps.is_targetable())
+	sim.sit(1, &"t1")
+	assert_true(ps.is_targetable(), "back at a table: back in the game")
+	sim.stand(1)
+	sim.tick(Tuning.REJOIN_GRACE_SECONDS)
+	sim.caught(1)
+	sim.reach_back_room(1)
+	sim.tick(Tuning.BACK_ROOM_TIMEOUT + 0.1)
+	assert_false(ps.is_targetable())
+	ps.heat.add(Tuning.WATCHED_AT, HeatRules.BUMP_GUARD)
+	assert_true(ps.is_targetable(), "drew attention: grace over")
+
+
+func test_curb_rejoin_also_comes_back_at_the_entrance_with_grace() -> void:
+	var sim := _sim(BOTTOM)
+	var ps := sim.player(1)
+	for i in Tuning.STRIKES_TO_THROW_OUT:
+		if ps.rejoin_grace > 0.0:
+			sim.tick(ps.rejoin_grace + 0.01)
+		sim.caught(1)
+		sim.reach_back_room(1)
+		if ps.status == HR.PlayerStatus.DETAINED:
+			sim.tick(Tuning.BACK_ROOM_TIMEOUT + 0.1)
+	assert_eq(ps.status, HR.PlayerStatus.ON_CURB)
+	sim.tick(Tuning.CURB_TIMEOUT + 0.1)
+	var last: Dictionary = _events(&"rejoined").back()
+	assert_eq(last["from"], &"curb")
+	assert_eq(last["spawn"], &"entrance")
+	assert_eq(ps.zone, HR.ZoneType.ENTRANCE)
+	assert_false(ps.is_targetable())
+
+
+func test_passed_check_clears_the_player_crew_wide() -> void:
+	var sim := _sim()
+	var ps := sim.player(1)
+	ps.heat.add(Tuning.SUSPECTED_AT + 5.0, &"test")
+	sim.start_id_check(1, 3)
+	sim.answer_id_check(1, int(ps.id_question["correct_index"]))
+	assert_true(ps.id_cleared())
+	assert_eq(ps.id_cleared_level, HR.HeatLevel.SUSPECTED)
+	assert_true(sim.snapshot()["players"][1]["id_cleared"])
+	var again := sim.start_id_check(1, 4)
+	assert_false(again["ok"], "a second guard doesn't check them back to back")
+	assert_eq(again["reason"], FloorSim.CLEARED)
+	assert_eq(_events(&"id_check").size(), 1)
+	# Hotter within the same level: still cleared. Wanted: not.
+	ps.heat.add(10.0, &"test")
+	assert_true(ps.id_cleared())
+	ps.heat.add(Tuning.WANTED_AT, &"test")
+	assert_false(ps.id_cleared(), "rose above the level they passed at")
+
+
+func test_clearance_follows_the_lowest_level_since() -> void:
+	var sim := _sim()
+	var ps := sim.player(1)
+	ps.heat.add(Tuning.SUSPECTED_AT + 5.0, &"test")
+	sim.start_id_check(1)
+	sim.answer_id_check(1, int(ps.id_question["correct_index"]))
+	ps.heat.add(-20.0, &"test")
+	assert_eq(ps.level(), HR.HeatLevel.WATCHED)
+	assert_true(ps.id_cleared())
+	ps.heat.add(20.0, &"test")
+	assert_false(ps.id_cleared(), "cooled to Watched then back to Suspected: check again")
+	assert_true(sim.start_id_check(1)["ok"])
+
+
+func test_new_poster_match_ends_the_clearance() -> void:
+	var sim := _sim()
+	var ps := sim.player(1)
+	sim.start_id_check(1)
+	sim.answer_id_check(1, int(ps.id_question["correct_index"]))
+	assert_true(ps.id_cleared())
+	sim.report_seen(1)
+	assert_true(ps.id_cleared(), "no poster yet")
+	sim.run.posters.print_poster(sim.run.casino_id(), 1, ps.outfit)
+	sim.report_seen(1)
+	assert_false(ps.id_cleared(), "a new poster match")
+	# Passing while matching a poster: the same match doesn't end it.
+	sim.start_id_check(1)
+	sim.answer_id_check(1, int(ps.id_question["correct_index"]))
+	assert_true(ps.id_cleared())
+	assert_true(ps.id_cleared_poster)
+	sim.report_seen(1)
+	assert_true(ps.id_cleared(), "the poster they passed with")
+
+
+func test_clearance_resets_on_rejoin_and_new_visit() -> void:
+	var sim := _sim(TOP + 1)
+	sim.run.bank = 1000
+	var ps := sim.player(1)
+	sim.start_id_check(1)
+	sim.answer_id_check(1, int(ps.id_question["correct_index"]))
+	assert_true(ps.id_cleared())
+	sim.caught(1)
+	sim.reach_back_room(1)
+	sim.tick(Tuning.BACK_ROOM_TIMEOUT + 0.1)
+	assert_false(ps.id_cleared(), "processed: a clean slate")
+	ps.id_cleared_level = 0
+	var next := FloorSim.new(sim.run, 2, [ps])
+	assert_false(next.player(1).id_cleared(), "a new casino doesn't know them")
+
+
+func test_snapshot_says_whether_the_casino_has_cameras() -> void:
+	var apex := _sim(TOP)
+	assert_true(CasinoLadder.has_security(TOP, HR.SecurityType.CAMERA))
+	assert_true(CasinoLadder.has_security(TOP, HR.SecurityType.HEAD_OF_SECURITY))
+	assert_true(apex.snapshot()["run"]["has_cameras"])
+	var sals := _sim(BOTTOM)
+	assert_false(CasinoLadder.has_security(BOTTOM, HR.SecurityType.CAMERA), "no cameras to follow you at Sal's")
+	assert_true(CasinoLadder.has_security(BOTTOM, HR.SecurityType.FLOOR_GUARD))
+	assert_false(CasinoLadder.has_security(99, HR.SecurityType.FLOOR_GUARD), "no such rung")
+	assert_false(sals.snapshot()["run"]["has_cameras"])
+	assert_true(_sim(TOP + 3).snapshot()["run"]["has_cameras"], "Neon Oasis has the first cameras")
+	assert_eq(sals.snapshot()["run"]["security"], [HR.SecurityType.FLOOR_GUARD])
+
+
+func test_climb_needs_a_stake_for_the_casino_above() -> void:
+	var sim := _sim(TOP + 3)
+	var ps := sim.player(1)
+	var buy_in := CasinoLadder.buy_in_to_leave(TOP + 3)
+	sim.run.bank = buy_in
+	ps.wallet.spend(ps.wallet.pocket)
+	sim.enter_zone(1, HR.ZoneType.EXIT, &"door")
+	var r := sim.try_climb()
+	assert_eq(r["reason"], FloorSim.NO_STAKE)
+	assert_eq(r["to"], TOP + 2)
+	assert_eq(r["stake"], int(CasinoLadder.casino(TOP + 2)["min_bet"]))
+	assert_false(sim.finished)
+	assert_eq(sim.snapshot()["run"]["climb_stake"], r["stake"])
+	ps.wallet.add(r["stake"] - 1)
+	assert_eq(sim.try_climb()["reason"], FloorSim.NO_STAKE)
+	ps.wallet.add(1)
+	assert_true(sim.try_climb()["ok"])
+
+
+func test_a_stretch_that_would_leave_the_crew_broke_climbs_one_rung() -> void:
+	var sim := _sim(TOP + 3)
+	var ps := sim.player(1)
+	var buy_in := CasinoLadder.buy_in_to_leave(TOP + 3)
+	sim.run.bank = Tuning.STRETCH_MULT * buy_in
+	ps.wallet.spend(ps.wallet.pocket)
+	sim.enter_zone(1, HR.ZoneType.EXIT, &"door")
+	var r := sim.try_climb()
+	assert_true(r["ok"], str(r))
+	assert_eq(r["to"], TOP + 2, "one rung, keeping a buy-in's worth in the bank")
+	assert_eq(r["cost"], buy_in)
+	assert_eq(sim.run.bank, buy_in)
+
+
+func test_outfit_swaps_back_and_forth_cool_only_once_per_cooldown() -> void:
+	var sim := _sim()
+	var ps := sim.player(1)
+	ps.heat.add(90.0, &"test")
+	sim.enter_zone(1, HR.ZoneType.RESTROOM, &"wc")
+	assert_almost_eq(sim.change_to_stash(1, 0)["heat"], Tuning.CHANGE_OUTFIT_HEAT)
+	var after := ps.heat.value
+	var again := sim.change_to_stash(1, 0)
+	assert_true(again["ok"], "the look still changes")
+	assert_almost_eq(again["heat"], 0.0, 0.001, "but swapping straight back cools nothing")
+	assert_almost_eq(ps.heat.value, after)
+	sim.tick(Tuning.CHANGE_OUTFIT_COOLDOWN)
+	var later := ps.heat.value
+	assert_almost_eq(sim.change_to_stash(1, 0)["heat"], Tuning.CHANGE_OUTFIT_HEAT)
+	assert_almost_eq(ps.heat.value, later + Tuning.CHANGE_OUTFIT_HEAT)
+	assert_almost_eq(HeatRules.change_outfit_heat(INF), Tuning.CHANGE_OUTFIT_HEAT)
+	assert_almost_eq(HeatRules.change_outfit_heat(Tuning.CHANGE_OUTFIT_COOLDOWN - 0.1), 0.0)
+
+
+func test_winning_at_slots_pauses_the_blend() -> void:
+	var sim := _sim()
+	_rich(sim, 1)
+	_seat(sim, 1, HR.GameType.SLOTS)
+	var ps := sim.player(1)
+	ps.heat.add(30.0, &"test")
+	_bet_until(sim, 1, &"t1", _max_bet(sim), true)
+	log.clear()
+	sim.tick(Tuning.SLOT_BLEND_WIN_PAUSE_SECONDS - 0.5)
+	assert_eq(_heat_events(HeatRules.SLOT_BLEND).size(), 0, "no blending in right after a payout")
+	sim.tick(1.0)
+	assert_eq(_heat_events(HeatRules.SLOT_BLEND).size(), 1, "back to blending in")
+	# A max-bet win plus a min-bet throw every few rounds no longer nets out.
+	var start := ps.heat.value
+	for i in 12:
+		if i % 3 == 2:
+			sim.place_bet(1, &"t1", _min_bet(sim), {"throw": true})
+		else:
+			sim.place_bet(1, &"t1", _max_bet(sim))
+		sim.tick(float(Tuning.GAMES[HR.GameType.SLOTS]["round_seconds"]))
+	assert_gt(ps.heat.value, start, "winning at slots builds Heat")
+
+
+func test_noise_radii_stay_local() -> void:
+	# A big wheel or jackpot pulls the guards nearby, not every guard on the Apex floor.
+	assert_lte(float(Tuning.NOISE_RADIUS[&"big_wheel"]), 16.0)
+	assert_lte(float(Tuning.NOISE_RADIUS[&"slot_jackpot"]), 18.0)
+	assert_gt(float(Tuning.NOISE_RADIUS[&"big_wheel"]), float(Tuning.NOISE_RADIUS[&"knock_over"]))
+	assert_gt(float(Tuning.NOISE_RADIUS[&"slot_jackpot"]), float(Tuning.NOISE_RADIUS[&"throw_chips"]))
+
+
 # --- Visits -----------------------------------------------------------------
 
 func test_carried_players_keep_kit_and_reset_visit_state() -> void:
@@ -1405,10 +1834,12 @@ func test_snapshot_shape() -> void:
 	for key in ["players", "run", "tables", "fire_alarm", "fire_alarm_seconds", "slot_alarm_cooldown", "forger_location", "forger_seconds_until_move", "posters", "finished", "outcome"]:
 		assert_has(snap, key)
 	var p: Dictionary = snap["players"][1]
-	for key in ["pid", "name", "heat", "level", "pocket", "lifetime_banked", "status", "status_seconds", "zone", "area_id", "table_id", "round", "outfit", "stash", "stash_size", "id", "id_index", "ids", "id_count", "id_check", "recorded_look", "recognized", "matches_poster", "staff_uniform", "available", "flags"]:
+	for key in ["pid", "name", "heat", "level", "pocket", "lifetime_banked", "status", "status_seconds", "zone", "area_id", "table_id", "round", "outfit", "stash", "stash_size", "id", "id_index", "ids", "id_count", "id_check", "recorded_look", "recognized", "matches_poster", "staff_uniform", "available", "targetable", "rejoin_grace", "id_cleared", "loiter_seconds", "loitering", "flags"]:
 		assert_has(p, key)
 	assert_eq(p["name"], "P1")
-	assert_eq(p["pocket"], Tuning.START_CHIPS)
+	assert_eq(p["pocket"], CasinoLadder.start_chips(TOP + 1))
+	assert_true(p["targetable"])
+	assert_false(p["id_cleared"])
 	assert_eq(p["stash_size"], Tuning.START_STASH_OUTFITS)
 	assert_eq(p["id_count"], 1)
 	assert_eq(p["id"]["name"], sim.player(1).current_id().name)
@@ -1416,8 +1847,10 @@ func test_snapshot_shape() -> void:
 	assert_eq(snap["players"][2]["table_id"], &"t1")
 	assert_eq(snap["players"][2]["status"], HR.PlayerStatus.SEATED)
 	var run: Dictionary = snap["run"]
-	for key in ["rung", "casino_id", "casino_name", "min_bet", "max_bet", "strikes", "max_strikes", "bank", "buy_in", "stretch_buy_in", "climb_target", "can_climb", "top_banked", "score", "top_seconds", "visit_seconds", "elapsed_seconds", "visits", "fire_alarm_used", "is_top", "is_bottom"]:
+	for key in ["rung", "casino_id", "casino_name", "min_bet", "max_bet", "strikes", "max_strikes", "bank", "buy_in", "stretch_buy_in", "climb_target", "can_climb", "top_banked", "score", "top_seconds", "visit_seconds", "elapsed_seconds", "visits", "fire_alarm_used", "is_top", "is_bottom", "security", "has_cameras", "start_chips", "climb_stake", "scoring"]:
 		assert_has(run, key)
+	assert_true(run["has_cameras"], "the Marquee has cameras")
+	assert_eq(run["start_chips"], CasinoLadder.start_chips(TOP + 1))
 	assert_eq(run["casino_name"], "The Grand Marquee")
 	assert_eq(run["buy_in"], int(Tuning.CASINOS[0]["buy_in"]))
 	assert_eq(run["stretch_buy_in"], 0, "no rung two above the second")

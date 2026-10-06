@@ -307,8 +307,8 @@ func test_buy_in_to_leave_is_the_casino_above() -> void:
 	assert_eq(CasinoLadder.buy_in_to_leave(TOP), 0)
 	for rung in range(TOP + 1, BOTTOM + 1):
 		assert_eq(CasinoLadder.buy_in_to_leave(rung), _buy_in(rung - 1), "rung %d" % rung)
-	assert_eq(CasinoLadder.buy_in_to_leave(6), 200)
-	assert_eq(CasinoLadder.buy_in_to_leave(2), 17000)
+	assert_eq(CasinoLadder.buy_in_to_leave(6), 100)
+	assert_eq(CasinoLadder.buy_in_to_leave(2), 21000)
 
 
 func test_climb_target_single_rung() -> void:
@@ -327,7 +327,7 @@ func test_climb_target_stretch_skips_a_rung() -> void:
 		var stretch := Tuning.STRETCH_MULT * CasinoLadder.buy_in_to_leave(rung)
 		assert_eq(CasinoLadder.climb_target(rung, stretch), rung - 2, "rung %d" % rung)
 		assert_eq(CasinoLadder.climb_target(rung, stretch * 10), rung - 2, "never more than two")
-	assert_eq(CasinoLadder.climb_target(6, 400), 4)
+	assert_eq(CasinoLadder.climb_target(6, 200), 4)
 
 
 func test_climb_target_stretch_blocked_above_top() -> void:
@@ -343,10 +343,10 @@ func test_climb_target_top_rung_is_impossible() -> void:
 
 
 func test_climb_cost() -> void:
-	assert_eq(CasinoLadder.climb_cost(6, 5), 200)
-	assert_eq(CasinoLadder.climb_cost(6, 4), Tuning.STRETCH_MULT * 200)
-	assert_eq(CasinoLadder.climb_cost(2, 1), 17000)
-	assert_eq(CasinoLadder.climb_cost(3, 1), Tuning.STRETCH_MULT * 6000)
+	assert_eq(CasinoLadder.climb_cost(6, 5), 100)
+	assert_eq(CasinoLadder.climb_cost(6, 4), Tuning.STRETCH_MULT * 100)
+	assert_eq(CasinoLadder.climb_cost(2, 1), 21000)
+	assert_eq(CasinoLadder.climb_cost(3, 1), Tuning.STRETCH_MULT * 7500)
 	assert_eq(CasinoLadder.climb_cost(4, 4), 0, "no climb")
 	assert_eq(CasinoLadder.climb_cost(TOP, TOP), 0)
 	assert_eq(CasinoLadder.climb_cost(6, 3), 0, "three rungs is not a legal climb")
@@ -600,6 +600,38 @@ func test_top_banked_is_never_spent() -> void:
 	assert_eq(run.climb(), TOP)
 	assert_eq(run.top_banked, 50_000)
 	assert_eq(run.score(), 50_000)
+
+
+func test_tick_without_scoring_keeps_the_clock_but_not_top_seconds() -> void:
+	var run := RunState.new()
+	run.tick(10.0, false)
+	assert_almost_eq(run.top_seconds, 0.0, 0.001, "the crew couldn't play: no score for time")
+	assert_almost_eq(run.elapsed_seconds, 10.0)
+	assert_almost_eq(run.visit_seconds, 10.0)
+	run.tick(5.0, true)
+	assert_almost_eq(run.top_seconds, 5.0)
+
+
+func test_climb_can_stop_one_rung_short_of_the_stretch() -> void:
+	var run := RunState.new(4)
+	var buy_in := CasinoLadder.buy_in_to_leave(4)
+	run.bank = Tuning.STRETCH_MULT * buy_in
+	assert_eq(run.climb_target(), 2)
+	assert_eq(run.climb(3), 3, "asked for one rung")
+	assert_eq(run.bank, buy_in)
+	var far := RunState.new(4)
+	far.bank = buy_in
+	assert_eq(far.climb(2), 3, "never further than the bank allows")
+	var none := RunState.new(4)
+	assert_eq(none.climb(3), 4, "nothing banked: no climb")
+
+
+func test_start_chips_grow_up_the_ladder() -> void:
+	for rung in range(Tuning.TOP_RUNG, Tuning.BOTTOM_RUNG):
+		assert_gt(CasinoLadder.start_chips(rung), CasinoLadder.start_chips(rung + 1), "rung %d" % rung)
+	for rung in range(Tuning.TOP_RUNG, Tuning.BOTTOM_RUNG + 1):
+		var row := CasinoLadder.casino(rung)
+		assert_gte(CasinoLadder.start_chips(rung), int(row["min_bet"]) * 4, "a few min bets to start with at rung %d" % rung)
 
 
 func test_tick_counts_top_seconds_only_at_top() -> void:

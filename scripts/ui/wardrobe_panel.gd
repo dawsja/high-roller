@@ -4,8 +4,12 @@ extends Control
 ## - MODE_RESTROOM: the stash as swatch rows; Wear swaps into one (request_change_to_stash).
 ## - MODE_GIFT_SHOP: pieces per slot with prices (request_buy_outfit_piece); a
 ##   bought piece lands in the stash as a copy of the worn look with that piece.
+##   Locked pieces (cosmetic unlocks) are for sale once this player's profile
+##   (set_profile) has unlocked them; the others show greyed out with the
+##   lifetime banked chips they need.
 ## - MODE_STEAL: a laundry cart or staff locker (request_steal_outfit_piece).
 ## Always shows the worn outfit and whether it matches a wanted poster.
+## Results arrive as host.request_done.
 
 signal closed()
 
@@ -30,8 +34,13 @@ var result_label: Label
 var close_button: Button
 ## Restroom: one Wear button per stash outfit (index = stash index).
 var wear_buttons: Array[Button] = []
-## Gift shop: one Buy button per piece of shop_slot (piece id -> Button).
+## Gift shop: one Buy button per piece of shop_slot this player can buy
+## (piece id -> Button).
 var buy_buttons: Dictionary = {}
+## Gift shop: locked pieces of shop_slot (piece id -> the "bank N more" Label).
+var locked_labels: Dictionary = {}
+## This player's progression (unlocked pieces, lifetime banked); null = none.
+var profile: Profile = null
 var slot_buttons: Array[Button] = []
 var steal_button: Button
 
@@ -51,10 +60,19 @@ func _init() -> void:
 func setup(p_host: SimHost, p_pid: int) -> void:
 	if host != null and host.sim_event.is_connected(_on_sim_event):
 		host.sim_event.disconnect(_on_sim_event)
+		host.request_done.disconnect(_on_request_done)
 	host = p_host
 	pid = p_pid
 	if host != null:
 		host.sim_event.connect(_on_sim_event)
+		host.request_done.connect(_on_request_done)
+
+
+## The local player's profile: which locked pieces the gift shop sells.
+func set_profile(p: Profile) -> void:
+	profile = p
+	if visible:
+		refresh()
 
 
 ## Opens in MODE_RESTROOM, MODE_GIFT_SHOP or MODE_STEAL (`source`: the
@@ -87,42 +105,49 @@ func select_slot(slot: int) -> void:
 func wear(index: int) -> Dictionary:
 	if host == null:
 		return {"ok": false, "reason": SimHost.NO_SIM}
-	var res: Dictionary = host.request_change_to_stash(pid, index)
-	if bool(res.get("ok", false)):
-		_result("New look! Heat %s" % UiTheme.signed(float(res.get("heat", 0.0))), UiTheme.WIN_COLOR)
-	else:
-		_fail(res)
-	refresh()
-	return res
+	return host.request_change_to_stash(pid, index)
 
 
 func buy(slot: int, piece: StringName) -> Dictionary:
 	if host == null:
 		return {"ok": false, "reason": SimHost.NO_SIM}
-	var res: Dictionary = host.request_buy_outfit_piece(pid, slot, piece)
-	if bool(res.get("ok", false)):
-		_result("Bought %s for %s. It's in your stash: change at a restroom." % [OutfitCatalog.piece_name(piece), UiTheme.chips(int(res.get("price", 0)))], UiTheme.WIN_COLOR)
-	else:
-		_fail(res)
-	refresh()
-	return res
+	return host.request_buy_outfit_piece(pid, slot, piece)
 
 
 func steal() -> Dictionary:
 	if host == null:
 		return {"ok": false, "reason": SimHost.NO_SIM}
-	var res: Dictionary = host.request_steal_outfit_piece(pid)
-	if bool(res.get("ok", false)):
-		if bool(res.get("uniform", false)):
-			_result("You swiped a full STAFF UNIFORM! Guards ignore staff, but staff can't sit at tables.", UiTheme.GOLD_LIGHT)
-		else:
-			_result("You swiped %s. It's in your stash." % OutfitCatalog.piece_name(StringName(str(res.get("piece", "")))), UiTheme.WIN_COLOR)
-	elif StringName(str(res.get("reason", ""))) == FloorSim.COOLDOWN:
-		_result("Someone's watching. Try again in %d s." % ceili(float(res.get("seconds", 0.0))), UiTheme.heat_color(HR.HeatLevel.WATCHED))
-	else:
-		_fail(res)
-	refresh()
-	return res
+	return host.request_steal_outfit_piece(pid)
+
+
+func _on_request_done(request: StringName, args: Array, res: Dictionary) -> void:
+	if args.is_empty() or int(args[0]) != pid or not (request in [&"change_to_stash", &"buy_outfit_piece", &"steal_outfit_piece"]):
+		return
+	var ok: bool = bool(res.get("ok", false))
+	match request:
+		&"change_to_stash":
+			if ok:
+				_result("New look! Heat %s" % UiTheme.signed(float(res.get("heat", 0.0))), UiTheme.WIN_COLOR)
+			else:
+				_fail(res)
+		&"buy_outfit_piece":
+			if ok:
+				var piece := StringName(str(args[2])) if args.size() > 2 else &""
+				_result("Bought %s for %s. It's in your stash: change at a restroom." % [OutfitCatalog.piece_name(piece), UiTheme.chips(int(res.get("price", 0)))], UiTheme.WIN_COLOR)
+			else:
+				_fail(res)
+		&"steal_outfit_piece":
+			if ok:
+				if bool(res.get("uniform", false)):
+					_result("You swiped a full STAFF UNIFORM! Guards ignore staff, but staff can't sit at tables.", UiTheme.GOLD_LIGHT)
+				else:
+					_result("You swiped %s. It's in your stash." % OutfitCatalog.piece_name(StringName(str(res.get("piece", "")))), UiTheme.WIN_COLOR)
+			elif StringName(str(res.get("reason", ""))) == FloorSim.COOLDOWN:
+				_result("Someone's watching. Try again in %d s." % ceili(float(res.get("seconds", 0.0))), UiTheme.heat_color(HR.HeatLevel.WATCHED))
+			else:
+				_fail(res)
+	if visible:
+		refresh()
 
 
 func refresh() -> void:
@@ -176,6 +201,7 @@ func _rebuild_list() -> void:
 	UiTheme.clear_children(list_box)
 	wear_buttons.clear()
 	buy_buttons.clear()
+	locked_labels.clear()
 	steal_button = null
 	match mode:
 		MODE_GIFT_SHOP:
@@ -219,12 +245,22 @@ func _build_shop() -> void:
 	var pocket: int = int(_me.get("pocket", 0))
 	var worn: Outfit = Outfit.from_dict(_me.get("outfit", {}))
 	_hint_label.text = "Pocket %s. Bought pieces go to your stash: change at a restroom." % UiTheme.chips(pocket)
-	for piece: StringName in OutfitCatalog.shop_pieces(shop_slot):
+	var unlocked: Array[StringName] = []
+	if profile != null:
+		unlocked = profile.unlocked_pieces()
+	for piece: StringName in OutfitCatalog.shop_pieces(shop_slot, unlocked, true):
+		if OutfitCatalog.is_locked(piece, unlocked):
+			_locked_row(piece)
+			continue
 		var row := _row()
 		row.add_child(UiTheme.make_swatch(OutfitCatalog.piece_color(piece), Vector2(36, 36)))
 		var n := UiTheme.make_label(OutfitCatalog.piece_name(piece), &"", UiTheme.FONT_BODY)
 		n.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		n.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+		if OutfitCatalog.is_unlockable(piece):
+			# One of this player's unlocks.
+			n.add_theme_color_override(&"font_color", UiTheme.GOLD_LIGHT)
+			n.tooltip_text = "Unlocked with lifetime banked chips"
 		row.add_child(n)
 		var price: int = OutfitCatalog.piece_price(piece)
 		var p := UiTheme.make_label(UiTheme.chips(price), &"BigLabel", 24)
@@ -237,6 +273,24 @@ func _build_shop() -> void:
 		b.pressed.connect(buy.bind(shop_slot, piece))
 		row.add_child(b)
 		buy_buttons[piece] = b
+
+
+## A locked piece: greyed out, with the lifetime banked chips it needs.
+func _locked_row(piece: StringName) -> void:
+	var row := _row()
+	row.modulate = Color(1, 1, 1, 0.5)
+	row.add_child(UiTheme.make_swatch(OutfitCatalog.piece_color(piece), Vector2(36, 36)))
+	var n := UiTheme.make_label(OutfitCatalog.piece_name(piece), &"", UiTheme.FONT_BODY, UiTheme.MUTED)
+	n.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	n.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	row.add_child(n)
+	var at: int = maxi(0, Unlocks.threshold(piece))
+	var to_go: int = profile.chips_to_unlock(piece) if profile != null else at
+	var l := UiTheme.make_label("LOCKED  ·  bank %s more" % UiTheme.chips(to_go), &"", 19, UiTheme.MUTED)
+	l.tooltip_text = "Unlocks at %s lifetime banked chips" % UiTheme.chips(at)
+	l.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	row.add_child(l)
+	locked_labels[piece] = l
 
 
 func _build_steal() -> void:

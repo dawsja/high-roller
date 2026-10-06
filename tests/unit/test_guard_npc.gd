@@ -270,9 +270,52 @@ func test_failed_id_check_leads_to_a_grab() -> void:
 	# The sim may fail a check on the spot (burned card): answer inside the signal.
 	guard.id_check_requested.connect(func(g: GuardNPC, pid: int) -> void: g.set_id_check_result(pid, false))
 	guard.grabbed.connect(func(_g: GuardNPC, pid: int) -> void: _entry(pid)["available"] = false)
-	var got := await _until(func() -> bool: return _count("grabbed", 1) > 0, 90)
+	# Check, ID_FAIL_REACTION_SECONDS of shouting, then the approach.
+	var got := await _until(func() -> bool: return _count("grabbed", 1) > 0, 150)
 	assert_true(got, "failed check -> grabbed")
 	assert_eq(_count("id_check_requested", 1), 1)
+
+
+func test_failed_id_check_shouts_before_the_chase() -> void:
+	await _bake()
+	var guard := _guard(HR.SecurityType.FLOOR_GUARD, Vector3.ZERO)
+	_player(1, Vector3(0, 0, -1.8), 60.0)
+	var shouts: Array = []
+	guard.shouted.connect(func(_g: GuardNPC, pid: int) -> void: shouts.append(pid))
+	guard.id_check_requested.connect(func(g: GuardNPC, pid: int) -> void: g.set_id_check_result(pid, false))
+	guard.grabbed.connect(func(_g: GuardNPC, pid: int) -> void: _entry(pid)["available"] = false)
+	assert_true(await _until(func() -> bool: return not shouts.is_empty(), 60), "a failed check shouts")
+	assert_eq(shouts, [1], "at the player who failed")
+	await _frames(1)
+	assert_true(guard.is_reacting())
+	assert_eq(guard.get_state(), HR.GuardState.CHASE)
+	assert_eq(guard.icon.text, GuardNPC.SHOUT_TEXT, "HEY! over the head")
+	assert_true(guard.icon.visible)
+	var start := guard.global_position
+	await _frames(int(Tuning.ID_FAIL_REACTION_SECONDS * 60.0 * 0.6))
+	assert_true(guard.is_reacting(), "still shouting")
+	assert_eq(_count("grabbed"), 0, "no grab during the reaction")
+	assert_lt(Perception.flat_distance(start, guard.global_position), 0.15, "stands while it shouts")
+	var player_pos: Vector3 = (_entry(1)["node"] as Node3D).global_position
+	assert_gt(guard.front_direction().dot((player_pos - guard.global_position).normalized()), 0.9, "faces the player")
+	assert_true(await _until(func() -> bool: return not guard.is_reacting(), 60), "the reaction ends")
+	assert_ne(guard.icon.text, GuardNPC.SHOUT_TEXT)
+	assert_almost_eq(guard.icon.scale.x, 1.0, 0.001, "the pulse stops with the bark")
+	assert_true(await _until(func() -> bool: return _count("grabbed", 1) > 0, 120), "then it runs and grabs")
+	assert_eq(shouts.size(), 1, "shouts once")
+
+
+func test_cleared_player_is_left_alone_until_wanted() -> void:
+	await _bake()
+	var guard := _guard(HR.SecurityType.FLOOR_GUARD, Vector3.ZERO)
+	_player(1, Vector3(0, 0, -4.5), 60.0)
+	_entry(1)["cleared"] = true
+	await _frames(20)
+	assert_gt(_count("saw_player", 1), 0)
+	assert_eq(guard.get_state(), HR.GuardState.PATROL, "passed a check with another guard: no walk-over")
+	assert_eq(_count("id_check_requested"), 0)
+	_entry(1)["heat"] = 90.0
+	assert_true(await _until(func() -> bool: return guard.get_state() == HR.GuardState.CHASE, 10), "Wanted is still chased")
 
 
 # --- Carry, struggle, stun ----------------------------------------------------
@@ -424,3 +467,23 @@ func test_unanswered_id_check_gives_up() -> void:
 	var gave_up := await _until(func() -> bool: return guard.get_state() == HR.GuardState.PATROL, 60)
 	assert_true(gave_up, "no answer ever came (the sim refused the check): lets them go")
 	assert_eq(_count("grabbed"), 0)
+
+
+func test_puppet_shows_the_hosts_bark() -> void:
+	var guard := GuardNPC.new()
+	guard.puppet = true
+	_world.add_child(guard)
+	var route: Array[Vector3] = [Vector3.ZERO]
+	guard.setup(1, HR.SecurityType.FLOOR_GUARD, route, Vector3(15, 0, 15), _provider)
+	guard.net_state = HR.GuardState.CHASE
+	guard.net_icon = GuardNPC.SHOUT_TEXT
+	guard.net_icon_color = GuardNPC.SHOUT_COLOR
+	await _frames(12)
+	assert_true(guard.is_reacting(), "a client's copy knows the guard is shouting")
+	assert_eq(guard.icon.text, GuardNPC.SHOUT_TEXT)
+	assert_true(guard.icon.visible)
+	assert_gt(guard.icon.scale.x, 1.0, "the bark pulses")
+	guard.net_icon = "!"
+	await _frames(2)
+	assert_false(guard.is_reacting())
+	assert_almost_eq(guard.icon.scale.x, 1.0, 0.001)

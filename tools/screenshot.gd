@@ -5,6 +5,9 @@ extends SceneTree
 ## Args: --rung=N (default 6), --out=DIR (absolute; default user://screenshots),
 ## --practice, --seed=N. Saves 00_title, 01_player, 02_overhead, 03_table and
 ## 04_hud PNGs, then quits.
+## Co-op (screenshot.sh --coop starts a headless host first): --join=ADDR:PORT
+## joins it as a client and saves 05_coop_view (a teammate with a nameplate),
+## 06_coop_hud (the crew panel) and 07_lobby.
 
 const MAIN_SCENE := "res://scenes/main.tscn"
 
@@ -13,6 +16,7 @@ var _rung: int = Tuning.BOTTOM_RUNG
 var _practice: bool = false
 var _seed: int = 7
 var _main: Node
+var _join: String = ""
 
 
 func _initialize() -> void:
@@ -25,7 +29,12 @@ func _initialize() -> void:
 			_seed = a.get_slice("=", 1).to_int()
 		elif a == "--practice":
 			_practice = true
-	_run.call_deferred()
+		elif a.begins_with("--join="):
+			_join = a.substr(7)
+	if _join != "":
+		_run_coop.call_deferred()
+	else:
+		_run.call_deferred()
 
 
 func _run() -> void:
@@ -82,6 +91,57 @@ func _run() -> void:
 	hud.resize(int(w * 1.25), int((top_h + bottom_h) * 1.25), Image.INTERPOLATE_BILINEAR)
 	_save(hud, "04_hud")
 	quit()
+
+
+## Joins the host given by --join and shoots the client's view of the crew.
+func _run_coop() -> void:
+	DirAccess.make_dir_recursive_absolute(_out)
+	var scene: PackedScene = load(MAIN_SCENE)
+	_main = scene.instantiate()
+	_main.set(&"parse_args", false)
+	var colon: int = _join.rfind(":")
+	_main.set(&"join_address", _join.substr(0, colon) if colon > 0 else _join)
+	_main.set(&"join_port", _join.substr(colon + 1).to_int() if colon > 0 else NetSession.DEFAULT_PORT)
+	_main.set(&"player_name", "Deuce")
+	root.add_child(_main)
+	var director: CasinoDirector = null
+	for i in 600:
+		director = _main.get(&"director")
+		if director != null and director.npcs_active and director.players.size() > 1:
+			break
+		await process_frame
+	if director == null:
+		print("screenshot: no co-op visit (is the host up?)")
+		quit(1)
+		return
+	await _frames(60)
+	var me: PlayerCharacter = director.player
+	var mate: PlayerCharacter = null
+	for pid: int in director.players:
+		if pid != me.pid:
+			mate = director.players[pid]
+	# Stand a little behind the teammate and look at them.
+	if mate != null:
+		var back := mate.global_position + Vector3(1.2, 0.0, 3.2)
+		me.teleport(back)
+		var to := mate.global_position - back
+		me.camera_rig.yaw = atan2(-to.x, -to.z)
+		me.camera_rig.snap()
+	await _frames(40)
+	await _shot("05_coop_view")
+	var img := await _grab()
+	var w: int = img.get_width()
+	var h: int = img.get_height()
+	var crop := img.get_region(Rect2i(0, 0, int(w * 0.5), int(h * 0.45)))
+	crop.resize(int(crop.get_width() * 1.5), int(crop.get_height() * 1.5), Image.INTERPOLATE_BILINEAR)
+	_save(crop, "06_coop_hud")
+	# The lobby panel over the running visit (tearing the visit down while
+	# the host still sends to it isn't a real flow).
+	var lobby: LobbyPanel = _main.get(&"lobby_panel")
+	lobby.open()
+	await _frames(20)
+	await _shot("07_lobby")
+	_main.call(&"quit_game")
 
 
 func _overhead(director: CasinoDirector) -> void:

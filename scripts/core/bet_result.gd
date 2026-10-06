@@ -12,7 +12,7 @@ var won: bool = false
 var payout: int = 0
 ## payout - bet.
 var net: int = 0
-## Signed: win Heat on a win, Tuning.LOSE_ON_PURPOSE_HEAT on a thrown loss, 0 on an honest loss.
+## Signed: win Heat on a win, HeatRules.lose_on_purpose_heat(bet, max_bet) on a thrown loss, 0 on an honest loss.
 var heat: float = 0.0
 ## The player's win streak at the table after this bet (0 after a loss).
 var streak: int = 0

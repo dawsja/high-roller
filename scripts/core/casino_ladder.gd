@@ -50,6 +50,19 @@ static func buy_in_to_leave(rung: int) -> int:
 	return int(casino(rung - 1)["buy_in"])
 
 
+## True if the casino on this rung has that HR.SecurityType (e.g. CAMERA:
+## "cameras follow you" only means something where there are cameras).
+static func has_security(rung: int, security_type: int) -> bool:
+	var kinds: Array = casino(rung).get("security", [])
+	return kinds.has(security_type)
+
+
+## Pocket each new player starts with in this casino (a run starting at
+## this rung). Tuning.START_CHIPS for a row without one or an invalid rung.
+static func start_chips(rung: int) -> int:
+	return int(casino(rung).get("start_chips", Tuning.START_CHIPS))
+
+
 ## Where `banked` chips can take the crew from `rung`: two rungs up with the
 ## stretch amount (if that stays on the ladder), one rung up with the buy-in,
 ## otherwise `rung` itself. Always `rung` at the top.

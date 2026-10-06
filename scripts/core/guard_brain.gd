@@ -26,10 +26,19 @@ extends RefCounted
 ## over and ask for ID (UNDERCOVER chases and grabs instead). Someone who
 ## failed or walked away from a check, or was being chased or carried, stays
 ## chase-worthy while remembered. Staff uniforms are ignored below Wanted.
-## Unavailable players (carried, detained, on the curb) are never targets.
-## Unnoticed and Watched players are never approached. A player who passed a
-## check is left alone until their Heat level rises above the lowest level
-## seen since, or they newly match a poster.
+## Unavailable players (carried, detained, on the curb, rejoin grace) are
+## never targets. Unnoticed and Watched players are never approached, but a
+## walk-over already under way keeps coming until the target's Heat drops
+## below WALKOVER_RELEASE_AT (hysteresis, so dipping just under Suspected
+## doesn't turn the guard around). A player who passed a check (with this
+## guard, or crew-wide: seen entry `cleared`) is never walked over to until
+## their Heat level rises above the lowest level seen since, or they newly
+## match a poster; Wanted is still chased.
+##
+## A failed ID check doesn't grab on the spot: the guard enters CHASE but
+## stands and shouts (action `shout`, intent `reacting: true`) for
+## ID_FAIL_REACTION_SECONDS first, and can't grab during that window, so the
+## player has a real chance to run.
 ##
 ## Starting on, or switching to, a target needs it in view this frame. The
 ## current target is followed from memory to its last seen position and given
@@ -37,8 +46,9 @@ extends RefCounted
 ## remembered for GUARD_MEMORY_SECONDS after last being seen.
 ##
 ## Actions: `ask_id` once per check (needs the target in view within
-## TALK_RANGE), `grab` (target in view within GRAB_RANGE), `drop_at_back_room`
-## on ctx.at_back_room, and `release` when the guard lets go of a carried
+## TALK_RANGE), `shout` once when a check fails (the reaction starts),
+## `grab` (target in view within GRAB_RANGE), `drop_at_back_room` on
+## ctx.at_back_room, and `release` when the guard lets go of a carried
 ## player itself (stunned without ctx.freed, or the fire alarm). At most one
 ## action per frame; a second one waits for the next frame.
 
@@ -46,6 +56,7 @@ signal state_changed(old_state: int, new_state: int)
 
 const ACT_NONE := &""
 const ACT_ASK_ID := &"ask_id"
+const ACT_SHOUT := &"shout"
 const ACT_GRAB := &"grab"
 const ACT_DROP := &"drop_at_back_room"
 const ACT_RELEASE := &"release"
@@ -77,6 +88,8 @@ class Known:
 	var staff_uniform: bool = false
 	var running: bool = false
 	var available: bool = true
+	## Passed an ID check with any guard (FloorSim / PlayerState.id_cleared()).
+	var cleared: bool = false
 	## Failed or fled an ID check, or was chased or carried: chase on sight.
 	var must_chase: bool = false
 
@@ -108,6 +121,8 @@ var _arrived_tick: int = -1
 var _wait_left: float = 0.0
 var _look_angle: float = 0.0
 var _stun_left: float = 0.0
+## A failed check's chase holds still (shouting) until this time.
+var _react_until: float = -INF
 ## move_to of the last intent, so a reached_destination meant for an old
 ## destination doesn't count for a new one.
 var _last_move_to: Variant = null
@@ -125,7 +140,7 @@ func _init(points: Array[Vector3], guard_type: int = HR.SecurityType.FLOOR_GUARD
 
 
 ## Advances the brain by `delta` seconds with this frame's perception and
-## returns the intent {move_to, speed, face, action}.
+## returns the intent {move_to, speed, face, action, reacting}.
 func update(delta: float, ctx: Dictionary) -> Dictionary:
 	_tick += 1
 	_time += maxf(delta, 0.0)
@@ -160,6 +175,11 @@ static func name_of(guard_state: int) -> String:
 ## True while the fire alarm keeps this guard off the floor.
 func is_evacuating() -> bool:
 	return _evacuating
+
+
+## True while a failed check's chase is still in its shouting reaction.
+func is_reacting() -> bool:
+	return state == CHASE and _time < _react_until
 
 
 ## Remembered players and their last seen Heat (pid -> float).
@@ -280,7 +300,7 @@ func _check_id(ctx: Dictionary, pos: Vector3) -> Dictionary:
 		return {}
 	var dist := Perception.flat_distance(pos, k.position)
 	if not _asked:
-		if mode == Approach.NONE:
+		if mode == Approach.NONE and not _keeps_coming(k):
 			return _drop_target()
 		var rival := _rival(k, false)
 		if rival != -1:
@@ -307,11 +327,7 @@ func _check_id(ctx: Dictionary, pos: Vector3) -> Dictionary:
 		_to_patrol()
 		return {}
 	if result == ID_FAILED:
-		k.must_chase = true
-		if _visible(k) and dist <= Tuning.GRAB_RANGE and _action == ACT_NONE:
-			_grab()
-		else:
-			_start_chase(k)
+		_start_chase(k, Tuning.ID_FAIL_REACTION_SECONDS)
 		return {}
 	if dist > Tuning.ID_CHECK_WALKAWAY_DISTANCE or _unseen_for(k) >= Tuning.LOSE_SIGHT_TO_SEARCH_SECONDS:
 		_start_chase(k)
@@ -327,6 +343,10 @@ func _chase(pos: Vector3) -> Dictionary:
 	if rival != -1:
 		_engage(rival)
 		return {}
+	if _time < _react_until:
+		var shout := _stand(k.position)
+		shout["reacting"] = true
+		return shout
 	if _visible(k) and Perception.flat_distance(pos, k.position) <= Tuning.GRAB_RANGE and _action == ACT_NONE:
 		_grab()
 		return {}
@@ -351,6 +371,8 @@ func _carry(ctx: Dictionary) -> Dictionary:
 func _set_state(new_state: int) -> void:
 	if new_state == state:
 		return
+	if new_state != CHASE:
+		_react_until = -INF
 	var old := state
 	state = new_state
 	state_changed.emit(old, new_state)
@@ -368,11 +390,15 @@ func _engage(pid: int) -> void:
 	_set_state(CHECK_ID)
 
 
-func _start_chase(k: Known) -> void:
+## `react_seconds` > 0: stand and shout that long before running (a failed check).
+func _start_chase(k: Known, react_seconds: float = 0.0) -> void:
 	target_pid = k.pid
 	k.must_chase = true
 	_asked = false
 	_set_state(CHASE)
+	_react_until = _time + react_seconds if react_seconds > 0.0 else -INF
+	if react_seconds > 0.0 and _action == ACT_NONE:
+		_action = ACT_SHOUT
 
 
 func _grab() -> void:
@@ -452,6 +478,7 @@ func _ingest(seen: Variant) -> void:
 		k.staff_uniform = bool(d.get("staff_uniform", false))
 		k.running = bool(d.get("running", false))
 		k.available = bool(d.get("available", true))
+		k.cleared = bool(d.get("cleared", false))
 		k.last_seen = _time
 		k.seen_tick = _tick
 		if not k.available and not (state == CARRY and pid == target_pid):
@@ -489,11 +516,23 @@ func _approach(k: Known) -> int:
 		return Approach.NONE
 	if k.must_chase:
 		return Approach.CHASE
-	if _cleared.has(k.pid):
+	if _is_cleared(k):
 		return Approach.NONE
 	if level == HR.HeatLevel.SUSPECTED or k.matches_poster:
 		return Approach.CHASE if security_type == HR.SecurityType.UNDERCOVER else Approach.CHECK
 	return Approach.NONE
+
+
+## Passed an ID check: with this guard (until their level rises or a new
+## poster match) or crew-wide (the seen entry's `cleared`).
+func _is_cleared(k: Known) -> bool:
+	return k.cleared or _cleared.has(k.pid)
+
+
+## A walk-over already under way keeps going while the target is still hot
+## enough (WALKOVER_RELEASE_AT), even if they dipped under Suspected.
+func _keeps_coming(k: Known) -> bool:
+	return k.available and not k.staff_uniform and not _is_cleared(k) and k.heat >= Tuning.WALKOVER_RELEASE_AT
 
 
 ## Highest-Heat player in view this frame worth approaching (only ones worth
@@ -562,11 +601,11 @@ func _reached(ctx: Dictionary, dest: Vector3) -> bool:
 # --- Helpers ------------------------------------------------------------------
 
 func _move(dest: Vector3, speed: float, face: Variant = null) -> Dictionary:
-	return {"move_to": dest, "speed": speed, "face": face, "action": _action}
+	return {"move_to": dest, "speed": speed, "face": face, "action": _action, "reacting": false}
 
 
 func _stand(face: Variant = null) -> Dictionary:
-	return {"move_to": null, "speed": 0.0, "face": face, "action": _action}
+	return {"move_to": null, "speed": 0.0, "face": face, "action": _action, "reacting": false}
 
 
 ## HR.HeatLevel for a Heat value (same thresholds as HeatMeter.level_for).

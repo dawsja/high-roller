@@ -5,7 +5,9 @@ extends Control
 ## use with its winnings cap (warns before a cash-out would flag the name), the
 ## Heat a large cash-out adds, taking chips back out of the crew bank
 ## (request_withdraw, up to Tuning.UI_WITHDRAW_MAX_BETS max bets a press) and
-## "hand chips to a teammate" (disabled solo).
+## "hand chips to a teammate" (disabled solo). Results come back as
+## host.request_done (right away offline and on the host, after a round trip
+## on a co-op client).
 
 signal cashed_out(result: Dictionary)
 signal closed()
@@ -52,10 +54,12 @@ func _init() -> void:
 func setup(p_host: SimHost, p_pid: int) -> void:
 	if host != null and host.sim_event.is_connected(_on_sim_event):
 		host.sim_event.disconnect(_on_sim_event)
+		host.request_done.disconnect(_on_request_done)
 	host = p_host
 	pid = p_pid
 	if host != null:
 		host.sim_event.connect(_on_sim_event)
+		host.request_done.connect(_on_request_done)
 
 
 func open() -> void:
@@ -75,40 +79,19 @@ func is_open() -> bool:
 	return visible
 
 
-## Banks `amount` pocket chips. Returns the request result.
+## Banks `amount` pocket chips. Returns the request result ({ok: true,
+## reason: &"pending"} on a co-op client; the answer shows when it arrives).
 func cash_out(amount: int) -> Dictionary:
 	if host == null:
 		return {"ok": false, "reason": SimHost.NO_SIM}
-	var res: Dictionary = host.request_cash_out(pid, amount)
-	if bool(res.get("ok", false)):
-		var text := "Banked %s." % UiTheme.chips(int(res.get("banked", 0)))
-		if float(res.get("heat", 0.0)) > 0.0:
-			text += "  Heat %s" % UiTheme.signed(float(res.get("heat", 0.0)))
-		if bool(res.get("flagged", false)):
-			text += "  The name is FLAGGED now!"
-		result_label.text = text
-		result_label.add_theme_color_override(&"font_color", UiTheme.LOSS_COLOR if bool(res.get("flagged", false)) else UiTheme.WIN_COLOR)
-		cashed_out.emit(res)
-	else:
-		result_label.text = UiTheme.reason_text(StringName(str(res.get("reason", ""))))
-		result_label.add_theme_color_override(&"font_color", UiTheme.LOSS_COLOR)
-	refresh()
-	return res
+	return host.request_cash_out(pid, amount)
 
 
 ## Takes `amount` chips out of the crew bank into the pocket. Returns the request result.
 func withdraw(amount: int) -> Dictionary:
 	if host == null:
 		return {"ok": false, "reason": SimHost.NO_SIM}
-	var res: Dictionary = host.request_withdraw(pid, amount)
-	if bool(res.get("ok", false)):
-		result_label.text = "Took %s chips out of the crew bank." % UiTheme.chips(int(res.get("amount", 0)))
-		result_label.add_theme_color_override(&"font_color", UiTheme.WIN_COLOR)
-	else:
-		result_label.text = UiTheme.reason_text(StringName(str(res.get("reason", ""))))
-		result_label.add_theme_color_override(&"font_color", UiTheme.LOSS_COLOR)
-	refresh()
-	return res
+	return host.request_withdraw(pid, amount)
 
 
 ## What the withdraw button takes: the bank, up to UI_WITHDRAW_MAX_BETS max bets.
@@ -121,15 +104,34 @@ func give_chips(amount: int) -> Dictionary:
 	if host == null or _teammates.is_empty():
 		return {"ok": false, "reason": FloorSim.UNKNOWN_PLAYER}
 	var to: int = _teammates[clampi(give_target.selected, 0, _teammates.size() - 1)]
-	var res: Dictionary = host.request_give_chips(pid, to, amount)
-	if bool(res.get("ok", false)):
-		result_label.text = "Handed %s chips over." % UiTheme.chips(amount)
-		result_label.add_theme_color_override(&"font_color", UiTheme.WIN_COLOR)
-	else:
+	return host.request_give_chips(pid, to, amount)
+
+
+func _on_request_done(request: StringName, args: Array, res: Dictionary) -> void:
+	if args.is_empty() or int(args[0]) != pid or not (request in [&"cash_out", &"withdraw", &"give_chips"]):
+		return
+	var ok: bool = bool(res.get("ok", false))
+	if not ok:
 		result_label.text = UiTheme.reason_text(StringName(str(res.get("reason", ""))))
 		result_label.add_theme_color_override(&"font_color", UiTheme.LOSS_COLOR)
+	else:
+		match request:
+			&"cash_out":
+				var text := "Banked %s." % UiTheme.chips(int(res.get("banked", 0)))
+				if float(res.get("heat", 0.0)) > 0.0:
+					text += "  Heat %s" % UiTheme.signed(float(res.get("heat", 0.0)))
+				if bool(res.get("flagged", false)):
+					text += "  The name is FLAGGED now!"
+				result_label.text = text
+				result_label.add_theme_color_override(&"font_color", UiTheme.LOSS_COLOR if bool(res.get("flagged", false)) else UiTheme.WIN_COLOR)
+				cashed_out.emit(res)
+			&"withdraw":
+				result_label.text = "Took %s chips out of the crew bank." % UiTheme.chips(int(res.get("amount", 0)))
+				result_label.add_theme_color_override(&"font_color", UiTheme.WIN_COLOR)
+			&"give_chips":
+				result_label.text = "Handed %s chips over." % UiTheme.chips(int(args[2]) if args.size() > 2 else 0)
+				result_label.add_theme_color_override(&"font_color", UiTheme.WIN_COLOR)
 	refresh()
-	return res
 
 
 func refresh() -> void:

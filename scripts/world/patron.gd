@@ -5,6 +5,8 @@ extends CharacterBody3D
 ## over, scramble for a few seconds (a physical blob that blocks guards) and
 ## then go back to what it was doing. Thinks at a low, staggered rate
 ## (PATRON_REPATH_SECONDS) so dozens stay cheap. Spawned by PatronCrowd.
+## A co-op client's patrons are puppets: PatronCrowd places them from the
+## host's synced state and they don't think.
 
 enum Mode { PAUSE, WANDER, SEATED, RUSH, SCRAMBLE, RETURN }
 
@@ -24,6 +26,8 @@ var seat: Transform3D = Transform3D.IDENTITY
 var has_seat: bool = false
 ## Model yaw in radians; 0 faces -Z.
 var facing: float = 0.0
+## Co-op client copy: PatronCrowd moves it (see PatronCrowd.net_state).
+var puppet: bool = false
 
 var _rng := RandomNumberGenerator.new()
 var _points: Array[Vector3] = []
@@ -105,6 +109,8 @@ func is_seated() -> bool:
 
 
 func _physics_process(delta: float) -> void:
+	if puppet:
+		return
 	if mode == Mode.SEATED:
 		model.set_pose(&"play")
 		return

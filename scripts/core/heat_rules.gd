@@ -25,14 +25,26 @@ const CASH_OUT := &"cash_out"
 const CAMERA := &"camera"
 const TACKLE := &"tackle"
 const SHARED_ROLL := &"shared_roll"
+## Not playing for LOITER_GRACE_SECONDS: "Security notices someone who isn't playing".
+const LOITERING := &"loitering"
 ## Used by HeatMeter.reset().
 const RESET := &"reset"
 
 const ALL_REASONS: Array[StringName] = [
 	WIN, STREAK, CAMPING, LOSE_ON_PURPOSE, AREA_CHANGE, OFF_TABLE, SLOT_BLEND,
 	FLOOR_DECAY, CHANGE_OUTFIT, RUN_IN_VIEW, TABLE_JUMP, BUMP_GUARD, KNOCK_OVER,
-	POSTER_MATCH, CASH_OUT, CAMERA, TACKLE, SHARED_ROLL, RESET,
+	POSTER_MATCH, CASH_OUT, CAMERA, TACKLE, SHARED_ROLL, LOITERING, RESET,
 ]
+
+## Reasons passive_rates produces: they tick every frame, so UIs, logs and
+## the network layer merge or filter them (popups ignore them).
+const PASSIVE_REASONS: Array[StringName] = [CAMPING, SLOT_BLEND, OFF_TABLE, FLOOR_DECAY, RUN_IN_VIEW, CAMERA, LOITERING]
+
+## Heat earned by playing at the table you sit at. Only these can swap the
+## dealer when they carry a player into Watched (FloorSim): table-jump,
+## camera, poster or other Heat that happens to cross Watched while seated
+## does not.
+const TABLE_PLAY_REASONS: Array[StringName] = [WIN, STREAK, SHARED_ROLL, CAMPING]
 
 ## Zones that count as "time off the tables".
 const OFF_TABLE_ZONES: Array[int] = [HR.ZoneType.BAR, HR.ZoneType.BUFFET, HR.ZoneType.RESTROOM]
@@ -108,19 +120,30 @@ static func passive_rate(ctx: Dictionary) -> float:
 ## `zone: int` (HR.ZoneType, default FLOOR), `running_in_view: bool`,
 ## `in_camera_view: bool`, `heat: float` (the player's Heat: cameras only add
 ## Heat from Watched up, design doc "Watched: cameras follow you"; without
-## the key the camera always counts).
+## the key the camera always counts), `loiter_seconds: float` (seconds since
+## the player last sat down or played; default 0), `seconds_since_win: float`
+## (default INF: slot blend pauses for SLOT_BLEND_WIN_PAUSE_SECONDS after a win).
 ## Seated at slots: SLOT_BLEND (slots never count as camping). Seated anywhere
 ## else: CAMPING once past CAMP_GRACE_SECONDS. Not seated: OFF_TABLE in a bar,
-## buffet or restroom, otherwise FLOOR_DECAY. RUN_IN_VIEW and CAMERA add on top.
+## buffet or restroom, otherwise FLOOR_DECAY. Loitering (past
+## LOITER_GRACE_SECONDS) replaces SLOT_BLEND / OFF_TABLE / FLOOR_DECAY with
+## LOITERING; at other tables CAMPING already covers sitting idle.
+## RUN_IN_VIEW and CAMERA add on top.
 static func passive_rates(ctx: Dictionary) -> Dictionary:
 	var rates: Dictionary = {}
 	var seated_game: int = int(ctx.get("seated_game", -1))
+	var loitering: bool = is_loitering(float(ctx.get("loiter_seconds", 0.0)))
 	if seated_game == HR.GameType.SLOTS:
-		rates[SLOT_BLEND] = Tuning.SLOT_BLEND_HEAT_PER_SECOND
+		if loitering:
+			rates[LOITERING] = Tuning.LOITER_HEAT_PER_SECOND
+		elif float(ctx.get("seconds_since_win", INF)) >= Tuning.SLOT_BLEND_WIN_PAUSE_SECONDS:
+			rates[SLOT_BLEND] = Tuning.SLOT_BLEND_HEAT_PER_SECOND
 	elif seated_game >= 0:
 		var camp: float = camping_rate(float(ctx.get("seconds_at_table", 0.0)))
 		if camp != 0.0:
 			rates[CAMPING] = camp
+	elif loitering:
+		rates[LOITERING] = Tuning.LOITER_HEAT_PER_SECOND
 	else:
 		var zone: int = int(ctx.get("zone", HR.ZoneType.FLOOR))
 		if is_off_table_zone(zone):
@@ -154,6 +177,21 @@ static func is_off_table_zone(zone: int) -> bool:
 	return OFF_TABLE_ZONES.has(zone)
 
 
+## Past LOITER_GRACE_SECONDS without sitting down or playing.
+static func is_loitering(loiter_seconds: float) -> bool:
+	return loiter_seconds > Tuning.LOITER_GRACE_SECONDS
+
+
+## True for a per-frame passive reason (see PASSIVE_REASONS).
+static func is_passive(reason: StringName) -> bool:
+	return PASSIVE_REASONS.has(reason)
+
+
+## True for Heat earned by playing at the table (see TABLE_PLAY_REASONS).
+static func is_table_play(reason: StringName) -> bool:
+	return TABLE_PLAY_REASONS.has(reason)
+
+
 # --- Multipliers ------------------------------------------------------------
 
 ## ctx.pit_boss_view → PIT_BOSS_HEAT_MULT, else 1. Applies to positive gains only.
@@ -175,7 +213,8 @@ static func scale_gain(amount: float, ctx: Dictionary) -> float:
 ## Flat Heat for an unconditional one-off event reason (LOSE_ON_PURPOSE,
 ## AREA_CHANGE, CHANGE_OUTFIT, TABLE_JUMP, BUMP_GUARD, KNOCK_OVER, POSTER_MATCH).
 ## 0 for any other reason. Use area_change_heat / table_jump_heat when the
-## conditions still need checking.
+## conditions still need checking; LOSE_ON_PURPOSE here is the max-bet value
+## (lose_on_purpose_heat scales it by the bet).
 static func event_heat(reason: StringName) -> float:
 	match reason:
 		LOSE_ON_PURPOSE:
@@ -193,6 +232,25 @@ static func event_heat(reason: StringName) -> float:
 		POSTER_MATCH:
 			return Tuning.POSTER_MATCH_HEAT
 	return 0.0
+
+
+## Cool-down for changing outfit: CHANGE_OUTFIT_HEAT, or 0 if the last change
+## was under CHANGE_OUTFIT_COOLDOWN seconds ago (pass INF if never).
+static func change_outfit_heat(seconds_since_last: float) -> float:
+	if seconds_since_last < Tuning.CHANGE_OUTFIT_COOLDOWN:
+		return 0.0
+	return Tuning.CHANGE_OUTFIT_HEAT
+
+
+## Thrown loss: LOSE_ON_PURPOSE_HEAT × bet / max_bet (ratio clamped to
+## [0, 1]; a non-positive max_bet counts as the max). Throwing the max bet
+## cools the full amount, a min bet a tenth of it, so a heat-neutral loop of
+## big wins and tiny throws at one table doesn't pay.
+static func lose_on_purpose_heat(bet: int, max_bet: int) -> float:
+	var ratio: float = 1.0
+	if max_bet > 0:
+		ratio = clampf(float(bet) / float(max_bet), 0.0, 1.0)
+	return Tuning.LOSE_ON_PURPOSE_HEAT * ratio
 
 
 ## Cool-down for moving into a different game area. 0 if either area is empty

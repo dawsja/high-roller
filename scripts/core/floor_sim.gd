@@ -52,6 +52,10 @@ const CANT_CLIMB := &"cant_climb"
 const NOT_AT_EXIT := &"not_at_exit"
 const UNKNOWN_POSTER := &"unknown_poster"
 const NO_SLOT := &"no_slot"
+## start_id_check on a player who already passed a check (PlayerState.id_cleared()).
+const CLEARED := &"cleared"
+## try_climb that would land the crew upstairs unable to cover a bet there.
+const NO_STAKE := &"no_stake"
 
 # --- ID check result reasons (id_result.reason) -------------------------------
 const ID_CORRECT := &"correct"
@@ -88,6 +92,8 @@ var broke_seconds: float = 0.0
 var _casino: Dictionary = {}
 var _table_positions: Dictionary = {}
 var _broke_warned: bool = false
+## pid -> reason of the player's last Heat change (decides dealer swaps).
+var _heat_reason: Dictionary = {}
 
 
 ## `carried_players` are PlayerStates from the previous visit (the crew).
@@ -113,18 +119,19 @@ func _init(p_run: RunState, p_seed: int, carried_players: Array = []) -> void:
 
 # --- Setup ------------------------------------------------------------------
 
-## Adds a new player: START_CHIPS, a random outfit, a START_ID_GRADE ID and
+## Adds a new player: this casino's start_chips (a fresh run at this rung;
+## CasinoLadder.start_chips), a random outfit, a START_ID_GRADE ID and
 ## START_STASH_OUTFITS random outfits in the stash. Returns the existing
 ## player for a pid already in the crew. Emits &"player_joined".
 func add_player(pid: int, display_name: String) -> PlayerState:
 	if players.has(pid):
 		return players[pid]
 	var ps := PlayerState.new(pid, display_name)
-	ps.wallet = Wallet.new(Tuning.START_CHIPS)
+	ps.wallet = Wallet.new(CasinoLadder.start_chips(run.rung))
 	ps.outfit = OutfitCatalog.random_outfit(rng)
 	for i in Tuning.START_STASH_OUTFITS:
 		ps.stash.append(OutfitCatalog.random_outfit(rng))
-	ps.ids.append(IdGenerator.generate(Tuning.START_ID_GRADE, rng, _id_names()))
+	ps.ids.append(IdGenerator.generate(Tuning.START_ID_GRADE, rng, _id_names(), run.name_packs(pid)))
 	ps.id_index = 0
 	_adopt(ps)
 	_emit(&"player_joined", {"pid": pid, "name": display_name})
@@ -148,7 +155,9 @@ func register_table(id: StringName, game_type: int, area_id: StringName, positio
 
 ## Sits at a table (standing up from another one first). `in_view`: a guard
 ## sees it, so leaving another table under TABLE_JUMP_WINDOW ago adds
-## table-jump Heat. Staff uniforms can't sit; closed tables refuse.
+## table-jump Heat (never a dealer swap). Staff uniforms can't sit; closed
+## tables refuse. Ends the after-rejoin grace; resets the loiter timer once
+## per play.
 ## -> {ok, reason, table_id, game_type, heat}
 func sit(pid: int, table_id: StringName, in_view: bool = false) -> Dictionary:
 	var ps := _ps(pid)
@@ -171,6 +180,10 @@ func sit(pid: int, table_id: StringName, in_view: bool = false) -> Dictionary:
 		_stand_up(ps)
 	t.seat(pid)
 	ps.table_id = table_id
+	ps.rejoin_grace = 0.0
+	if ps.loiter_sit_reset:
+		ps.loiter_sit_reset = false
+		ps.loiter_seconds = 0.0
 	_set_status(ps, HR.PlayerStatus.SEATED)
 	_emit(&"seated", {"pid": pid, "table_id": table_id, "game_type": t.game_type})
 	var jump: float = HeatRules.table_jump_heat(ps.last_table_id, table_id, ps.seconds_since_left_table, in_view)
@@ -205,6 +218,7 @@ func place_bet(pid: int, table_id: StringName, amount: int, choice: Dictionary =
 	if why != NO_REASON:
 		return _fail(why)
 	ps.wallet.spend(amount)
+	_mark_played(ps)
 	var r: BetResult
 	if t.game_type == HR.GameType.DICE:
 		var bet := {"pid": pid, "bet": amount, "throw": bool(choice.get("throw", false))}
@@ -257,6 +271,7 @@ func place_shared_roll(table_id: StringName, bets: Array) -> Dictionary:
 		return _fail(first_reject, {"results": {}, "rejected": rejected})
 	for entry: Dictionary in valid:
 		_ps(entry["pid"]).wallet.spend(entry["bet"])
+		_mark_played(_ps(entry["pid"]))
 	var rolled: Dictionary = GameResolver.resolve_shared_roll(t, valid, rng, _max_bet(), _payout_bonus())
 	var reason: StringName = HeatRules.SHARED_ROLL if valid.size() > 1 else HeatRules.WIN
 	var results: Dictionary = {}
@@ -279,6 +294,7 @@ func start_high_low(pid: int, table_id: StringName, bet: int) -> HighLowRun:
 	if last_reason != NO_REASON:
 		return null
 	ps.wallet.spend(bet)
+	_mark_played(ps)
 	var hl := HighLowRun.new(t, pid, bet, rng, _max_bet(), _payout_bonus())
 	ps.high_low = hl
 	ps.round_table_id = table_id
@@ -294,6 +310,7 @@ func high_low_guess(pid: int, higher: bool, throw: bool = false) -> Dictionary:
 	if why != NO_REASON:
 		return _fail(why)
 	var hl: HighLowRun = ps.high_low
+	_mark_played(ps)
 	var r: BetResult = hl.guess(higher, throw)
 	var over: bool = hl.finished
 	if over:
@@ -310,6 +327,7 @@ func high_low_cash_out(pid: int) -> Dictionary:
 	var why := _round_check(ps, &"high_low")
 	if why != NO_REASON:
 		return _fail(why)
+	_mark_played(ps)
 	var r: BetResult = _cash_out_high_low(ps)
 	return _ok({"result": r.to_dict(), "payout": r.payout, "pocket": ps.wallet.pocket})
 
@@ -325,6 +343,7 @@ func start_blackjack(pid: int, table_id: StringName, bet: int) -> BlackjackRound
 	if last_reason != NO_REASON:
 		return null
 	ps.wallet.spend(bet)
+	_mark_played(ps)
 	var bj := BlackjackRound.new(t, pid, bet, rng, _max_bet(), _payout_bonus())
 	ps.blackjack = bj
 	ps.round_table_id = table_id
@@ -340,6 +359,7 @@ func blackjack_hit(pid: int) -> Dictionary:
 	if why != NO_REASON:
 		return _fail(why)
 	var bj: BlackjackRound = ps.blackjack
+	_mark_played(ps)
 	var card: int = bj.hit()
 	var extra := {"card": card, "total": bj.player_total(), "finished": bj.finished, "result": {}}
 	if bj.finished:
@@ -358,6 +378,7 @@ func blackjack_stand(pid: int) -> Dictionary:
 	var why := _round_check(ps, &"blackjack")
 	if why != NO_REASON:
 		return _fail(why)
+	_mark_played(ps)
 	var r: BetResult = _stand_blackjack(ps)
 	return _ok({"result": r.to_dict(), "pocket": ps.wallet.pocket})
 
@@ -405,7 +426,9 @@ func set_player_flags(pid: int, new_flags: Dictionary) -> Dictionary:
 ## A guard (or pit boss) sees the player this frame. ctx: {guard_id: int,
 ## pit_boss: bool}. A poster match in this casino adds POSTER_MATCH_HEAT once
 ## per sighting (re-arms after POSTER_MATCH_REARM_SECONDS unseen or an outfit
-## change). -> {ok, reason, matches_poster, recognized, poster_id (-1), heat}
+## change; not during the after-rejoin grace) and ends a passed check's
+## clearance if they didn't match a poster when they passed.
+## -> {ok, reason, matches_poster, recognized, poster_id (-1), heat}
 func report_seen(pid: int, ctx: Dictionary = {}) -> Dictionary:
 	var ps := _ps(pid)
 	var why := _common(ps)
@@ -413,8 +436,9 @@ func report_seen(pid: int, ctx: Dictionary = {}) -> Dictionary:
 		return _fail(why, {"matches_poster": false, "recognized": false, "poster_id": -1, "heat": 0.0})
 	ps.seconds_unseen = 0.0
 	var poster: WantedPoster = run.posters.matching_poster(run.casino_id(), ps.outfit)
+	_refresh_clearance(ps, poster != null)
 	var applied := 0.0
-	if poster != null and ps.poster_match_armed and ps.is_available():
+	if poster != null and ps.poster_match_armed and ps.is_targetable():
 		ps.poster_match_armed = false
 		var pit_boss: bool = bool(ctx.get("pit_boss", false))
 		_emit(&"poster_match", {"pid": pid, "poster_id": poster.id, "guard_id": int(ctx.get("guard_id", -1)), "pit_boss": pit_boss})
@@ -429,7 +453,8 @@ func report_seen(pid: int, ctx: Dictionary = {}) -> Dictionary:
 
 # --- Identity ---------------------------------------------------------------
 
-## Restroom: swaps the worn outfit with stash[index]. CHANGE_OUTFIT_HEAT.
+## Restroom: swaps the worn outfit with stash[index]. CHANGE_OUTFIT_HEAT (none within
+## CHANGE_OUTFIT_COOLDOWN of the last change).
 ## -> {ok, reason, outfit, heat}
 func change_to_stash(pid: int, index: int) -> Dictionary:
 	var ps := _ps(pid)
@@ -492,7 +517,7 @@ func buy_outfit_piece(pid: int, slot: int, piece_id: StringName) -> Dictionary:
 	var why := _free_in_zone(ps, HR.ZoneType.GIFT_SHOP)
 	if why != NO_REASON:
 		return _fail(why)
-	if not OutfitCatalog.fits(piece_id, slot) or not OutfitCatalog.is_for_sale(piece_id):
+	if not OutfitCatalog.fits(piece_id, slot) or not OutfitCatalog.is_for_sale(piece_id, run.unlocked_pieces(pid)):
 		return _fail(BAD_PIECE)
 	if ps.outfit.get_piece(slot) == piece_id:
 		return _fail(ALREADY_WEARING)
@@ -553,7 +578,7 @@ func buy_id(pid: int, grade: int) -> Dictionary:
 	var price: int = forger.price(grade)
 	if not ps.wallet.spend(price):
 		return _fail(NOT_ENOUGH)
-	var id: FakeId = forger.make_id(grade, rng, _id_names())
+	var id: FakeId = IdGenerator.generate(grade, rng, _id_names(), run.name_packs(pid))
 	ps.ids.append(id)
 	ps.id_index = ps.ids.size() - 1
 	_emit_id(ps, &"bought")
@@ -577,7 +602,9 @@ func swap_id(pid: int, index: int) -> Dictionary:
 
 ## A guard asks for ID. Fails on the spot (auto_fail) with no card, a burned or
 ## flagged card, or a cheap card spotted on sight; otherwise the player gets a
-## quiz (status ID_CHECK) to answer with answer_id_check.
+## quiz (status ID_CHECK) to answer with answer_id_check. Refused (ok false)
+## during the after-rejoin grace (NOT_AVAILABLE) and for a player who already
+## passed a check (CLEARED, crew-wide: PlayerState.id_cleared()).
 ## -> {ok, reason, auto_fail, fail_reason, question {field, prompt, options}, seconds}
 func start_id_check(pid: int, guard_id: int = -1) -> Dictionary:
 	var ps := _ps(pid)
@@ -586,6 +613,8 @@ func start_id_check(pid: int, guard_id: int = -1) -> Dictionary:
 		return _fail(why)
 	if not ps.can_act():
 		return _fail(BUSY)
+	if not ps.is_targetable():
+		return _fail(NOT_AVAILABLE)
 	var id: FakeId = ps.current_id()
 	var fail_reason: StringName = &""
 	if id == null:
@@ -594,6 +623,8 @@ func start_id_check(pid: int, guard_id: int = -1) -> Dictionary:
 		fail_reason = ID_BURNED
 	elif id.flagged:
 		fail_reason = ID_FLAGGED
+	elif ps.id_cleared():
+		return _fail(CLEARED)
 	elif IdQuiz.spotted_on_sight(id, rng):
 		fail_reason = ID_SPOTTED
 	if fail_reason != &"":
@@ -673,14 +704,15 @@ func deface_poster(pid: int, poster_id: int, slot: int = -1) -> Dictionary:
 # --- Capture ----------------------------------------------------------------
 
 ## A guard grabbed the player: stands them up (rounds settle), drops any ID
-## check, status CARRIED. The whole crew carried/detained at once (crew of
-## CREW_WIPE_MIN_PLAYERS+) throws it out. -> {ok, reason}
+## check, status CARRIED. Refused (NOT_AVAILABLE) unless targetable (on the
+## floor and past the after-rejoin grace). The whole crew carried/detained at
+## once (crew of CREW_WIPE_MIN_PLAYERS+) throws it out. -> {ok, reason}
 func caught(pid: int, guard_id: int = -1) -> Dictionary:
 	var ps := _ps(pid)
 	var why := _common(ps)
 	if why != NO_REASON:
 		return _fail(why)
-	if not ps.is_available():
+	if not ps.is_targetable():
 		return _fail(NOT_AVAILABLE)
 	_drop_id_check(ps)
 	_stand_up(ps)
@@ -717,7 +749,8 @@ func freed(pid: int, tackler_pid: int = 0) -> Dictionary:
 
 
 ## The guard got the player to the back room: pocket chips lost, current ID
-## burned, Heat reset, a crew strike, DETAINED for BACK_ROOM_TIMEOUT. Third
+## burned, Heat reset, a crew strike, DETAINED for BACK_ROOM_TIMEOUT, then
+## `rejoined` at the entrance with REJOIN_GRACE_SECONDS of grace. Third
 ## strike (or the whole crew held) throws the crew out.
 ## -> {ok, reason, chips_lost, strikes, thrown_out, curb}
 func reach_back_room(pid: int) -> Dictionary:
@@ -868,9 +901,13 @@ func give_chips(from_pid: int, to_pid: int, amount: int) -> Dictionary:
 
 ## Climbs when the bank covers the buy-in (two rungs with the stretch amount)
 ## and every player who isn't DETAINED is FREE in an EXIT zone. Ends the visit.
-## -> {ok, reason, from, to, cost, missing: [pids not at the exit]}
+## Refused with NO_STAKE when the crew would arrive unable to cover the
+## min bet up there (every pocket and the bank left after the buy-in short;
+## `stake` is that min bet); a stretch that would do that climbs one rung
+## instead when that leaves enough.
+## -> {ok, reason, from, to, cost, missing: [pids not at the exit], stake}
 func try_climb() -> Dictionary:
-	var extra := {"from": run.rung, "to": run.rung, "cost": 0, "missing": []}
+	var extra := {"from": run.rung, "to": run.rung, "cost": 0, "missing": [], "stake": 0}
 	if finished:
 		return _fail(FINISHED, extra)
 	if not run.can_climb():
@@ -887,25 +924,34 @@ func try_climb() -> Dictionary:
 	extra["missing"] = missing
 	if not missing.is_empty() or present == 0:
 		return _fail(NOT_AT_EXIT, extra)
+	var target: int = run.climb_target()
+	if _arrives_broke(target) and target == run.rung - 2 and not _arrives_broke(run.rung - 1):
+		target = run.rung - 1
+	if _arrives_broke(target):
+		extra["to"] = target
+		extra["stake"] = int(CasinoLadder.casino(target).get("min_bet", 1))
+		return _fail(NO_STAKE, extra)
 	for ps: PlayerState in players.values():
 		_clear_for_exit(ps)
 	var from: int = run.rung
-	var cost: int = run.climb_cost()
-	var to: int = run.climb()
+	var cost: int = CasinoLadder.climb_cost(from, target)
+	var to: int = run.climb(target)
 	finished = true
 	outcome = &"climbed"
 	_emit(&"climbed", {"from": from, "to": to, "cost": cost})
-	return _ok({"from": from, "to": to, "cost": cost, "missing": []})
+	return _ok({"from": from, "to": to, "cost": cost, "missing": [], "stake": 0})
 
 
 # --- Clock ------------------------------------------------------------------
 
 ## Advances the visit: tables, run clock, forger, fire alarm, slot alarm,
-## per-player timers (detention, curb, ID quiz, poster re-arm) and passive Heat.
+## per-player timers (detention, curb, ID quiz, poster re-arm, rejoin grace,
+## loitering) and passive Heat. Time at the top only scores while someone is
+## on the floor (not everyone DETAINED / ON_CURB) and the crew isn't broke.
 func tick(delta: float) -> void:
 	if finished or not delta > 0.0:
 		return
-	run.tick(delta)
+	run.tick(delta, _crew_scoring())
 	for t: TableState in tables.values():
 		t.tick(delta)
 	forger.tick(delta)
@@ -977,6 +1023,9 @@ func snapshot() -> Dictionary:
 		tables_out[t.id] = {"game_type": t.game_type, "area_id": t.area_id, "closed": t.closed, "seated": seated}
 	var buy_in: int = CasinoLadder.buy_in_to_leave(run.rung)
 	var stretch: int = CasinoLadder.climb_cost(run.rung, run.rung - 2)
+	var security: Array = []
+	security.assign(_casino.get("security", []))
+	var climb_to: int = run.climb_target()
 	return {
 		"players": ps_out,
 		"run": {
@@ -1001,6 +1050,11 @@ func snapshot() -> Dictionary:
 			"fire_alarm_used": run.fire_alarm_used,
 			"is_top": run.is_top(),
 			"is_bottom": run.is_bottom(),
+			"security": security,
+			"has_cameras": CasinoLadder.has_security(run.rung, HR.SecurityType.CAMERA),
+			"start_chips": CasinoLadder.start_chips(run.rung),
+			"climb_stake": int(CasinoLadder.casino(climb_to).get("min_bet", 0)) if climb_to < run.rung else 0,
+			"scoring": run.is_top() and _crew_scoring(),
 		},
 		"tables": tables_out,
 		"fire_alarm": fire_alarm_active(),
@@ -1127,6 +1181,9 @@ func _drop_id_check(ps: PlayerState) -> void:
 func _end_id_check(ps: PlayerState, passed: bool, reason: StringName) -> void:
 	var guard_id: int = ps.id_check_guard
 	_drop_id_check(ps)
+	if passed:
+		ps.id_cleared_level = ps.heat.level()
+		ps.id_cleared_poster = matches_poster(ps.pid)
 	if ps.status == HR.PlayerStatus.ID_CHECK:
 		_set_status(ps, HR.PlayerStatus.SEATED if _seated_table(ps) != null else HR.PlayerStatus.FREE)
 	_emit(&"id_result", {"pid": ps.pid, "guard_id": guard_id, "passed": passed, "reason": reason})
@@ -1153,7 +1210,7 @@ func _ensure_usable_id(ps: PlayerState) -> bool:
 		ps.id_index = i
 		_emit_id(ps, &"auto_swap")
 		return false
-	ps.ids.append(IdGenerator.generate(Tuning.REJOIN_ID_GRADE, rng, _id_names()))
+	ps.ids.append(IdGenerator.generate(Tuning.REJOIN_ID_GRADE, rng, _id_names(), run.name_packs(ps.pid)))
 	ps.id_index = ps.ids.size() - 1
 	_emit_id(ps, &"rejoin")
 	return true
@@ -1176,11 +1233,34 @@ func _owns_piece(ps: PlayerState, slot: int, piece: StringName) -> bool:
 	return false
 
 
+## A new look: poster match re-armed, clearance refreshed and the outfit
+## cool-down (none within CHANGE_OUTFIT_COOLDOWN of the last change).
 func _after_outfit_change(ps: PlayerState, reason: StringName) -> float:
 	ps.outfit_changes += 1
 	ps.poster_match_armed = true
+	_refresh_clearance(ps, matches_poster(ps.pid))
 	_emit_outfit(ps, true, reason)
-	return ps.heat.add(HeatRules.event_heat(HeatRules.CHANGE_OUTFIT), HeatRules.CHANGE_OUTFIT)
+	var cool: float = HeatRules.change_outfit_heat(ps.seconds_since_outfit_change)
+	ps.seconds_since_outfit_change = 0.0
+	return ps.heat.add(cool, HeatRules.CHANGE_OUTFIT)
+
+
+## A passed check stops counting on a new poster match (one that wasn't
+## there when they passed); not matching any more forgets the old match, so
+## matching again later counts as new.
+func _refresh_clearance(ps: PlayerState, poster_match: bool) -> void:
+	if not ps.id_cleared():
+		return
+	if poster_match and not ps.id_cleared_poster:
+		ps.clear_id_clearance()
+	else:
+		ps.id_cleared_poster = poster_match
+
+
+## Sat down or played: loitering starts over, and the next sit may reset it again.
+func _mark_played(ps: PlayerState) -> void:
+	ps.loiter_seconds = 0.0
+	ps.loiter_sit_reset = true
 
 
 func _poster_here(poster_id: int) -> WantedPoster:
@@ -1216,6 +1296,8 @@ func _add_heat(ps: PlayerState, amount: float, reason: StringName, extra_ctx: Di
 ## Pays out, emits &"bet", applies the result's Heat and any loud noise. Called
 ## exactly once per BetResult.
 func _apply_result(ps: PlayerState, r: BetResult, win_reason: StringName, round_over: bool) -> void:
+	if r.won:
+		ps.seconds_since_win = 0.0
 	if r.payout > 0:
 		ps.wallet.add(r.payout)
 	_emit(&"bet", {"pid": ps.pid, "table_id": r.table_id, "game_type": r.game_type, "result": r.to_dict(), "pocket": ps.wallet.pocket, "round_over": round_over})
@@ -1318,20 +1400,30 @@ func _throw_out(cause: StringName, to_rung: int = -1) -> void:
 	_emit(&"thrown_out", {"from": from, "to": to, "cause": cause})
 
 
+## Back on the floor after the back room or the curb: processed, so Heat 0,
+## no ID clearance, loitering starts over and guards leave them alone for
+## REJOIN_GRACE_SECONDS. They come back in at the entrance (`spawn`).
 func _rejoin(ps: PlayerState) -> void:
 	var from: StringName = &"curb" if ps.status == HR.PlayerStatus.ON_CURB else &"back_room"
 	ps.status_seconds = 0.0
-	ps.zone = HR.ZoneType.ENTRANCE if from == &"curb" else HR.ZoneType.FLOOR
+	ps.zone = HR.ZoneType.ENTRANCE
 	ps.area_id = &""
+	ps.rejoin_grace = Tuning.REJOIN_GRACE_SECONDS
+	ps.loiter_seconds = 0.0
+	ps.loiter_sit_reset = true
+	ps.clear_id_clearance()
+	ps.heat.reset()
 	_set_status(ps, HR.PlayerStatus.FREE)
 	var new_id: bool = _ensure_usable_id(ps)
-	_emit(&"rejoined", {"pid": ps.pid, "from": from, "new_id": new_id})
+	_emit(&"rejoined", {"pid": ps.pid, "from": from, "new_id": new_id, "spawn": &"entrance", "grace": Tuning.REJOIN_GRACE_SECONDS})
 
 
 func _tick_player(ps: PlayerState, delta: float) -> void:
 	if ps.seconds_since_left_table >= 0.0:
 		ps.seconds_since_left_table += delta
 	ps.seconds_since_area_change += delta
+	ps.seconds_since_outfit_change += delta
+	ps.seconds_since_win += delta
 	ps.seconds_unseen += delta
 	if ps.seconds_unseen >= Tuning.POSTER_MATCH_REARM_SECONDS:
 		ps.poster_match_armed = true
@@ -1349,9 +1441,16 @@ func _tick_player(ps: PlayerState, delta: float) -> void:
 			ps.id_check_seconds -= delta
 			if ps.id_check_seconds <= 0.0 and not ps.id_question.is_empty():
 				_end_id_check(ps, false, ID_TIMEOUT)
+	if ps.rejoin_grace > 0.0:
+		ps.rejoin_grace = maxf(0.0, ps.rejoin_grace - delta)
+	# Waiting at the exit for the crew is fine below the top (no score there).
+	if run.is_top() or ps.zone != HR.ZoneType.EXIT:
+		ps.loiter_seconds += delta
 	var ctx: Dictionary = ps.flags.duplicate()
 	ctx["zone"] = ps.zone
 	ctx["heat"] = ps.heat.value
+	ctx["loiter_seconds"] = ps.loiter_seconds
+	ctx["seconds_since_win"] = ps.seconds_since_win
 	var t := _seated_table(ps)
 	ctx["seated_game"] = t.game_type if t != null else -1
 	ctx["seconds_at_table"] = t.seconds_seated(ps.pid) if t != null else 0.0
@@ -1403,6 +1502,27 @@ func _check_broke(delta: float) -> void:
 			to = r
 			break
 	_throw_out(&"broke", to)
+
+
+## Time at the top counts towards the score: someone is on the floor (not
+## every player DETAINED or ON_CURB) and the crew can still cover a bet.
+func _crew_scoring() -> bool:
+	for ps: PlayerState in players.values():
+		if ps.status != HR.PlayerStatus.DETAINED and ps.status != HR.PlayerStatus.ON_CURB:
+			return not _crew_broke()
+	return false
+
+
+## After climbing to `target` (paying its cost) every pocket and the bank
+## left would be under the min bet there.
+func _arrives_broke(target: int) -> bool:
+	var min_bet: int = int(CasinoLadder.casino(target).get("min_bet", 1))
+	if run.bank - CasinoLadder.climb_cost(run.rung, target) >= min_bet:
+		return false
+	for ps: PlayerState in players.values():
+		if ps.wallet.pocket >= min_bet:
+			return false
+	return true
 
 
 ## Every pocket and the crew bank are under this casino's min bet, and no round is in progress.
@@ -1512,6 +1632,11 @@ func _player_snapshot(ps: PlayerState) -> Dictionary:
 		"matches_poster": run.posters.matching_poster(run.casino_id(), ps.outfit) != null,
 		"staff_uniform": ps.outfit.is_staff_uniform(),
 		"available": ps.is_available(),
+		"targetable": ps.is_targetable(),
+		"rejoin_grace": ps.rejoin_grace,
+		"id_cleared": ps.id_cleared(),
+		"loiter_seconds": ps.loiter_seconds,
+		"loitering": ps.is_loitering(),
 		"flags": ps.flags.duplicate(),
 	}
 
@@ -1519,6 +1644,7 @@ func _player_snapshot(ps: PlayerState) -> Dictionary:
 # --- Signal handlers ----------------------------------------------------------
 
 func _on_heat_changed(value: float, delta: float, reason: StringName, pid: int) -> void:
+	_heat_reason[pid] = reason
 	_emit(&"heat", {"pid": pid, "value": value, "delta": delta, "reason": reason, "level": HeatMeter.level_for(value)})
 
 
@@ -1530,11 +1656,19 @@ func _on_level_changed(old_level: int, new_level: int, pid: int) -> void:
 	if new_level < old_level:
 		if old_level == HR.HeatLevel.WANTED:
 			ps.poster_armed = true
+		if ps.id_cleared_level > new_level:
+			ps.id_cleared_level = new_level
 		return
+	if ps.id_cleared() and new_level > ps.id_cleared_level:
+		ps.clear_id_clearance()
+	if new_level >= HR.HeatLevel.WATCHED:
+		ps.rejoin_grace = 0.0
 	match new_level:
 		HR.HeatLevel.WATCHED:
+			# Only Heat earned playing this table swaps its dealer (not a
+			# table jump, camera or poster that crosses Watched as they sit).
 			var t := _seated_table(ps)
-			if t != null and not t.is_cooled(pid):
+			if t != null and not t.is_cooled(pid) and HeatRules.is_table_play(_heat_reason.get(pid, &"")):
 				t.mark_cooled(pid)
 				_emit(&"dealer_swap", {"pid": pid, "table_id": t.id})
 		HR.HeatLevel.SUSPECTED:

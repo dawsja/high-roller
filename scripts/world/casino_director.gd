@@ -12,6 +12,18 @@ extends Node3D
 ## When the visit ends (thrown out, climbed, or the run ended at the top
 ## exit) it stops the player and emits visit_finished(outcome) after
 ## visit_end_delay seconds; main.gd frees it and starts the next visit.
+##
+## Co-op (docs/ARCHITECTURE.md, "Networking"): every peer builds the same
+## visit from SimHost.visit_info() (same map seed, same node names). The
+## `authority` (the host, or offline) runs guards, cameras and patrons and
+## sends their state to the clients through MultiplayerSynchronizers; a
+## client's copies are puppets. Each peer moves only its own player; the
+## others are puppets of their owners. Placements the sim decides (sit,
+## stand, carry, release, back room, rejoin, curb) are host -> owner
+## &"place" world messages. A client's tackles, bumps, struggles and top-exit
+## presses go to the host as world messages; its own zones and interactions
+## become requests that the host validates. A client sends &"ready" once it
+## has built the visit; synchronizers only send to peers that are ready.
 
 ## &"thrown_out", &"climbed" or OUTCOME_RUN_OVER.
 signal visit_finished(outcome: StringName)
@@ -25,7 +37,21 @@ const LOCAL_PID := 1
 const OUTCOME_RUN_OVER := &"run_over"
 ## Physics frames to wait for the navmesh before starting NPCs anyway.
 const NAV_WAIT_MAX_FRAMES := 300
+## Co-op host: real seconds to wait for every client to build the visit
+## before the guards start anyway.
+const READY_WAIT_SECONDS := 10.0
+## Co-op host: a client's interaction, tackle or zone this much further
+## (flat metres) than the local rules allow is refused (sync lag allowance).
+const NET_REACH_SLACK := 2.5
+## Give chips (H): this share of the pocket, at least the casino's min bet.
+const GIVE_CHIPS_SHARE := 0.5
+const NAMEPLATE_REFRESH_SECONDS := 0.25
+## --net-log: the host sends guard positions this often (real seconds).
+const PROBE_SECONDS := 0.5
 const COAT_COLOR := Color("9b7b52")
+## The forger's collision capsule (his trench coat's width).
+const FORGER_RADIUS := 0.36
+const FORGER_HEIGHT := 1.8
 const NOISE_COLOR := Color(1.0, 0.85, 0.3, 0.5)
 const ALARM_COLOR := Color(1.0, 0.1, 0.05)
 const FORGER_LOOK := {"hat": "high_roller_fedora", "glasses": "aviator_shades", "top": "biker_jacket", "bottom": "pressed_slacks", "accessory": "none"}
@@ -39,7 +65,7 @@ var rung: int = Tuning.BOTTOM_RUNG
 var practice: bool = false
 var casino: Dictionary = {}
 var map: CasinoMap
-## The local player (pid LOCAL_PID).
+## This peer's player.
 var player: PlayerCharacter
 ## pid -> PlayerCharacter for the whole crew.
 var players: Dictionary = {}
@@ -48,9 +74,11 @@ var tables: Dictionary = {}
 var guards: Array[GuardNPC] = []
 var cameras: Array[SecurityCamera] = []
 var crowd: PatronCrowd
-## The forger NPC (moves on &"forger_moved") and its interactable.
+## The forger NPC (moves on &"forger_moved"), its body and its interactable.
 var forger_npc: Node3D
 var forger_model: CharacterModel
+## A world-layer capsule so nobody walks through him (built on every peer).
+var forger_body: StaticBody3D
 var forger_interactable: Interactable
 ## Parent of guards, patrons and the forger (process disabled until the navmesh is ready).
 var npc_root: Node3D
@@ -64,6 +92,16 @@ var visit_end_delay: float = Tuning.DIRECTOR_VISIT_END_SECONDS
 var input_blocked: bool = false
 ## What security_plan() gave for this visit.
 var plan: Dictionary = {}
+## This peer's pid (host.local_pid; LOCAL_PID offline).
+var local_pid: int = LOCAL_PID
+## A co-op session (host or client).
+var online: bool = false
+## Runs guards, cameras, patrons and player flags: offline and on the host.
+var authority: bool = true
+## Co-op: pids whose peers have built this visit (synchronizers send to them).
+var ready_peers: Array[int] = []
+## Co-op: the visit ended and this peer's synchronizers stopped sending.
+var net_stopped: bool = false
 
 # UI (all optional; tests may leave them out).
 var hud: Hud
@@ -79,6 +117,7 @@ var _fx_root: Node3D
 var _alarm_light: OmniLight3D
 var _time: float = 0.0
 var _nav_frames: int = 0
+var _ready_wait_until_msec: int = 0
 var _finish_left: float = -1.0
 var _finish_emitted: bool = false
 var _provider_cache: Array = []
@@ -97,7 +136,7 @@ var _camera_watch: Dictionary = {}
 var _flags_sent: Dictionary = {}
 ## pid -> GuardNPC carrying them.
 var _carriers: Dictionary = {}
-## pid -> Outfit the node wears.
+## pid -> outfit dict the node wears.
 var _worn: Dictionary = {}
 ## table id -> true: celebrate when its result has been shown.
 var _celebrate: Dictionary = {}
@@ -105,29 +144,52 @@ var _input_on: bool = true
 var _input_known: bool = false
 var _prompt: String = ""
 var _focus: Interactable
+## A give-chips press (H) is waiting for its answer.
+var _giving: bool = false
+var _nameplate_left: float = 0.0
+var _probe_due_msec: int = 0
+## --net-log, client: [msec, position] of the local player over the last second.
+var _trail: Array = []
+## --net-log, host: pid -> msec a guard grabbed them.
+var _grabbed_at: Dictionary = {}
 
 
 ## Builds the visit. `ui` holds the UI nodes main.gd owns, any of: hud,
 ## bet_panel, quiz_panel, cashier_panel, wardrobe_panel, forger_panel,
 ## visit_banner, debug_overlay. Needs this node in the tree (the navmesh is
-## baked here) and host.start_visit() already called.
+## baked here) and the visit started: host.start_visit() on the host and
+## offline, the host's visit announced on a client.
 func setup(p_host: SimHost, p_rung: int, p_practice: bool, ui: Dictionary = {}) -> void:
 	if not is_inside_tree():
 		push_error("CasinoDirector.setup: add the director to the tree first")
 		return
 	host = p_host
+	authority = host.is_authority()
+	online = host.is_online()
+	local_pid = host.local_pid
 	practice = p_practice
+	var info: Dictionary = host.visit_info()
 	var sim := _sim()
-	if sim == null:
-		push_error("CasinoDirector.setup: the host has no visit (call host.start_visit())")
-		return
-	rung = sim.run.rung
+	if authority:
+		if sim == null:
+			push_error("CasinoDirector.setup: the host has no visit (call host.start_visit())")
+			return
+		rung = sim.run.rung
+		casino = sim.casino()
+	else:
+		if info.is_empty():
+			push_error("CasinoDirector.setup: no visit announced by the host yet")
+			return
+		rung = int(info.get("rung", Tuning.BOTTOM_RUNG))
+		casino = CasinoLadder.casino(rung)
+		practice = bool(info.get("practice", p_practice))
 	if p_rung != rung:
 		push_warning("CasinoDirector.setup: rung %d asked, the sim is at rung %d" % [p_rung, rung])
-	casino = sim.casino()
 	name = "CasinoDirector_%s" % String(casino.get("id", &"casino"))
 	_take_ui(ui)
-	var seed_value: int = hash([String(casino.get("id", &"")), sim.run.visits, rung])
+	var seed_value: int = int(info.get("map_seed", 0))
+	if not info.has("map_seed") and sim != null:
+		seed_value = hash([String(casino.get("id", &"")), sim.run.visits, rung])
 
 	map = CasinoBuilder.build(casino, seed_value)
 	add_child(map)
@@ -151,14 +213,19 @@ func setup(p_host: SimHost, p_rung: int, p_practice: bool, ui: Dictionary = {}) 
 	_spawn_forger()
 	_setup_exit()
 	_refresh_posters()
-	_refresh_poster_matches()
-	if sim.fire_alarm_active():
+	if authority:
+		_refresh_poster_matches()
+	if _fire_alarm_active():
 		_set_fire_alarm(true)
 	host.sim_event.connect(_on_sim_event)
+	host.request_done.connect(_on_request_done)
+	host.world_message.connect(_on_world_message)
 	_connect_ui()
 	_close_panels()
 	_sync_input(true)
 	_welcome()
+	if online:
+		_start_net()
 
 
 ## Security for a casino row: {floor, undercover, head, pit_boss, cameras}.
@@ -183,7 +250,10 @@ static func security_plan(casino_row: Dictionary, practice_mode: bool, pit_posts
 
 
 ## players_provider for guards and cameras: {pid, node, heat, matches_poster,
-## staff_uniform, available} per crew member (rebuilt once per physics frame).
+## staff_uniform, available, cleared} per crew member (rebuilt once per
+## physics frame; available = PlayerState.is_targetable(), cleared =
+## id_cleared()).
+## Every player's node counts, so the host's guards see clients' synced bodies.
 func players_info() -> Array:
 	var frame: int = Engine.get_physics_frames()
 	if not _provider_dirty and frame == _provider_frame:
@@ -205,7 +275,8 @@ func players_info() -> Array:
 			"heat": ps.heat.value,
 			"matches_poster": bool(_poster_match.get(pid, false)),
 			"staff_uniform": ps.outfit.is_staff_uniform(),
-			"available": ps.is_available(),
+			"available": ps.is_targetable(),
+			"cleared": ps.id_cleared(),
 		})
 	return _provider_cache
 
@@ -216,52 +287,69 @@ func sync_input(force: bool = false) -> void:
 
 
 ## Uses an interactable as `pid` (what the player's interact press / hold does).
+## Results come back as host.request_done.
 func interact(pid: int, target: Interactable, held: bool = false) -> void:
 	if finished or target == null or not is_instance_valid(target) or not target.enabled:
 		return
 	var node: PlayerCharacter = players.get(pid)
 	target.use(node)
 	var pos: Vector3 = target.global_position
+	var mine: bool = pid == local_pid
 	match target.kind:
 		&"table":
 			var table_id: StringName = StringName(str(target.data.get("table_id", "")))
-			var ps := _ps(pid)
-			if ps != null and ps.table_id == table_id:
+			if _p_table(pid) == table_id:
 				return
-			_report_failure(host.request_sit(pid, table_id, _seen_recently(pid)), pid)
+			host.request_sit(pid, table_id, _seen_recently(pid))
 		&"cashier":
-			if cashier_panel != null and pid == LOCAL_PID:
+			if cashier_panel != null and mine:
 				cashier_panel.open()
 		&"restroom":
-			if wardrobe_panel != null and pid == LOCAL_PID:
+			if wardrobe_panel != null and mine:
 				wardrobe_panel.open_mode(WardrobePanel.MODE_RESTROOM)
 		&"gift_shop":
-			if wardrobe_panel != null and pid == LOCAL_PID:
+			if wardrobe_panel != null and mine:
 				wardrobe_panel.open_mode(WardrobePanel.MODE_GIFT_SHOP)
 		&"laundry_cart", &"staff_locker":
-			if wardrobe_panel != null and pid == LOCAL_PID:
+			if wardrobe_panel != null and mine:
 				wardrobe_panel.open_mode(WardrobePanel.MODE_STEAL, target.kind)
 		&"forger":
-			if forger_panel != null and pid == LOCAL_PID:
+			if forger_panel != null and mine:
 				forger_panel.open()
 		&"poster":
 			var poster_id: int = int(target.data.get("poster_id", -1))
 			if held:
-				_report_failure(host.request_tear_poster(pid, poster_id, pos), pid)
+				host.request_tear_poster(pid, poster_id, pos)
 			else:
-				var res: Dictionary = host.request_deface_poster(pid, poster_id)
-				if bool(res.get("ok", false)):
-					_notify(pid, "You drew over the %s on the poster." % OutfitCatalog.slot_name(int(res.get("slot", 0))).to_lower(), UiTheme.WIN_COLOR)
-				else:
-					_report_failure(res, pid)
+				host.request_deface_poster(pid, poster_id)
 		&"tray":
 			_knock_over(pid, target)
 		&"fire_alarm":
-			_report_failure(host.request_distraction(pid, HR.Distraction.FIRE_ALARM, pos), pid)
+			host.request_distraction(pid, HR.Distraction.FIRE_ALARM, pos)
 		&"slot_alarm":
-			_report_failure(host.request_distraction(pid, HR.Distraction.SLOT_ALARM, pos), pid)
+			host.request_distraction(pid, HR.Distraction.SLOT_ALARM, pos)
 		&"exit":
 			_use_exit(pid)
+
+
+## Co-op: drops a player who left the session (their body goes; a guard
+## carrying them lets go).
+func remove_player(pid: int) -> void:
+	var node: PlayerCharacter = players.get(pid)
+	players.erase(pid)
+	_carriers.erase(pid)
+	_worn.erase(pid)
+	_flags_sent.erase(pid)
+	_camera_watch.erase(pid)
+	ready_peers.erase(pid)
+	_provider_dirty = true
+	if authority:
+		for g: GuardNPC in guards:
+			if g.carrying_pid() == pid:
+				g.stun()
+	if node != null and is_instance_valid(node):
+		node.queue_free()
+	NetLog.line("player_removed", {"pid": pid})
 
 
 # --- Build --------------------------------------------------------------------
@@ -291,22 +379,35 @@ func _spawn_tables() -> void:
 
 
 func _spawn_players() -> void:
-	var sim := _sim()
 	var i := 0
-	for pid: int in sim.player_ids():
-		var ps := sim.player(pid)
-		var node := PlayerCharacter.new()
-		node.name = "Player%d" % pid
-		var spawn: Vector3 = map.spawn_points[i % map.spawn_points.size()] if not map.spawn_points.is_empty() else Vector3.ZERO
-		node.position = map.to_global(spawn)
-		add_child(node)
-		node.setup(pid, pid == LOCAL_PID, ps.outfit.copy())
-		_worn[pid] = ps.outfit.copy()
-		players[pid] = node
-		if pid == LOCAL_PID:
-			player = node
-			node.focus_changed.connect(_on_focus_changed)
-			node.pause_requested.connect(_on_pause_requested)
+	for pid: int in host.player_ids():
+		_spawn_player(pid, i)
+		i += 1
+
+
+func _spawn_player(pid: int, index: int) -> PlayerCharacter:
+	var node := PlayerCharacter.new()
+	node.name = "Player_%d" % pid
+	var spawn: Vector3 = map.spawn_points[index % map.spawn_points.size()] if not map.spawn_points.is_empty() else Vector3.ZERO
+	node.position = map.to_global(spawn)
+	var local: bool = pid == local_pid
+	if online:
+		node.set_multiplayer_authority(pid)
+	add_child(node)
+	var look := _outfit_dict(pid)
+	node.setup(pid, local, Outfit.from_dict(look))
+	_worn[pid] = look
+	players[pid] = node
+	if online:
+		node.enable_net_sync()
+		if not local:
+			node.make_puppet(node.global_position)
+			node.set_nameplate(_name_of(pid))
+	if local:
+		player = node
+		node.focus_changed.connect(_on_focus_changed)
+		node.pause_requested.connect(_on_pause_requested)
+	if local or not online:
 		node.interact_pressed.connect(_on_interact_pressed.bind(node))
 		node.interact_held.connect(_on_interact_held.bind(node))
 		node.tackle_requested.connect(_on_tackle_requested.bind(node))
@@ -315,7 +416,9 @@ func _spawn_players() -> void:
 		node.knock_over_requested.connect(_on_knock_over_requested.bind(node))
 		node.struggled.connect(_on_struggled.bind(node))
 		node.stand_requested.connect(_on_stand_requested.bind(node))
-		i += 1
+		node.give_chips_requested.connect(_on_give_chips_requested.bind(node))
+	NetLog.line("spawned", {"pid": pid, "node": node.name, "local": local})
+	return node
 
 
 func _spawn_security() -> void:
@@ -335,13 +438,20 @@ func _spawn_security() -> void:
 		var boss := _spawn_guard(HR.SecurityType.PIT_BOSS, points)
 		# Posts are on the aisle west of their table area: watch the tables.
 		boss.face_toward(post + Vector3.RIGHT * 4.0)
+		if boss.puppet:
+			boss.net_facing = boss.facing
 	for i in int(plan["cameras"]):
 		var cam := SecurityCamera.new()
 		cam.name = "Camera%d" % (i + 1)
+		cam.puppet = not authority
 		add_child(cam)
 		cam.setup(i + 1, map.global_transform * map.camera_mounts[i], players_info)
-		cam.watching.connect(_on_camera_watching)
-		cam.spotted.connect(_on_camera_spotted)
+		if authority:
+			cam.watching.connect(_on_camera_watching)
+			cam.spotted.connect(_on_camera_spotted)
+		# Both sides need the synchronizer: the host sends, a client applies.
+		if online:
+			cam.enable_net_sync()
 		cameras.append(cam)
 
 
@@ -361,14 +471,18 @@ func _spawn_guard(kind: int, route: Array[Vector3]) -> GuardNPC:
 	var id: int = guards.size() + 1
 	g.name = "Guard%d_%s" % [id, str(SECURITY_NAMES.get(kind, "guard")).replace(" ", "_")]
 	g.position = route[0] if not route.is_empty() else Vector3.ZERO
+	g.puppet = not authority
 	npc_root.add_child(g)
 	g.setup(id, kind, route, map.to_global(map.back_room_point), players_info)
-	g.saw_player.connect(_on_guard_saw)
-	g.id_check_requested.connect(_on_guard_id_check)
-	g.grabbed.connect(_on_guard_grabbed)
-	g.delivered.connect(_on_guard_delivered)
-	g.released.connect(_on_guard_released)
-	g.radioed.connect(_on_guard_radioed)
+	if authority:
+		g.saw_player.connect(_on_guard_saw)
+		g.id_check_requested.connect(_on_guard_id_check)
+		g.grabbed.connect(_on_guard_grabbed)
+		g.delivered.connect(_on_guard_delivered)
+		g.released.connect(_on_guard_released)
+		g.radioed.connect(_on_guard_radioed)
+	if online:
+		g.enable_net_sync()
 	guards.append(g)
 	return g
 
@@ -376,6 +490,7 @@ func _spawn_guard(kind: int, route: Array[Vector3]) -> GuardNPC:
 func _spawn_crowd(seed_value: int) -> void:
 	crowd = PatronCrowd.new()
 	crowd.name = "Crowd"
+	crowd.puppet = not authority
 	npc_root.add_child(crowd)
 	var points: Array[Vector3] = []
 	for p: Vector3 in map.patron_points:
@@ -385,6 +500,8 @@ func _spawn_crowd(seed_value: int) -> void:
 		seats.append(map.global_transform * s)
 	var counts: Dictionary = Tuning.DIRECTOR_PATRONS
 	crowd.setup(points, seats, int(counts.get(map.size_class, counts[&"small"])), seed_value)
+	if online:
+		crowd.enable_net_sync()
 
 
 func _spawn_forger() -> void:
@@ -407,12 +524,34 @@ func _spawn_forger() -> void:
 	var collar := Primitives.box(Vector3(0.5, 0.12, 0.32), COAT_COLOR.darkened(0.15))
 	collar.position = Vector3(0, 1.44, 0)
 	forger_model.add_child(collar)
+	# Solid like a wall (layer 1) for players, guards and patrons. Walking up to
+	# him stops a body's width away, well inside the interact reach below.
+	# Kept in the physics space while npc_root waits for the navmesh.
+	forger_body = StaticBody3D.new()
+	forger_body.name = "Body"
+	forger_body.collision_layer = CasinoBuilder.WORLD_LAYER
+	forger_body.collision_mask = 0
+	forger_body.disable_mode = CollisionObject3D.DISABLE_MODE_KEEP_ACTIVE
+	var shape := CollisionShape3D.new()
+	var capsule := CapsuleShape3D.new()
+	capsule.radius = FORGER_RADIUS
+	capsule.height = FORGER_HEIGHT
+	shape.shape = capsule
+	shape.position = Vector3(0, FORGER_HEIGHT * 0.5, 0)
+	forger_body.add_child(shape)
+	forger_npc.add_child(forger_body)
+	# Guards' avoidance steps round him (he isn't in the baked navmesh).
+	var obstacle := NavigationObstacle3D.new()
+	obstacle.name = "Obstacle"
+	obstacle.radius = FORGER_RADIUS + 0.1
+	obstacle.avoidance_enabled = true
+	forger_npc.add_child(obstacle)
 	# Small reach (+ the player's 1.5 m sensor): buy_id needs the player inside
 	# the forger's 4 m corner zone, and the restroom corner backs onto a wall.
 	forger_interactable = Interactable.create(&"forger", "Buy a fake ID", 0.25, {"location": &""})
 	forger_interactable.position = Vector3(0, 1.0, 0)
 	forger_npc.add_child(forger_interactable)
-	_move_forger(_sim().forger.location())
+	_move_forger(_forger_location())
 
 
 func _move_forger(location: StringName) -> void:
@@ -456,8 +595,16 @@ func _connect_ui() -> void:
 
 
 func _disconnect_ui() -> void:
-	if host != null and host.sim_event.is_connected(_on_sim_event):
-		host.sim_event.disconnect(_on_sim_event)
+	if host != null:
+		if host.sim_event.is_connected(_on_sim_event):
+			host.sim_event.disconnect(_on_sim_event)
+		if host.request_done.is_connected(_on_request_done):
+			host.request_done.disconnect(_on_request_done)
+		if host.world_message.is_connected(_on_world_message):
+			host.world_message.disconnect(_on_world_message)
+		if authority and online:
+			for request: StringName in [&"sit", &"give_chips", &"enter_zone"]:
+				host.set_validator(request, Callable())
 	if bet_panel != null and is_instance_valid(bet_panel) and bet_panel.leave_requested.is_connected(_on_bet_leave):
 		bet_panel.leave_requested.disconnect(_on_bet_leave)
 	if debug_overlay != null and is_instance_valid(debug_overlay):
@@ -478,6 +625,8 @@ func _welcome() -> void:
 	var text := "Welcome to %s." % str(casino.get("name", "the casino"))
 	if practice:
 		text = "Practice at %s: one sleepy guard. Win, then cool off." % str(casino.get("name", ""))
+	if online and players.size() > 1:
+		text += " Crew of %d." % players.size()
 	hud.push_notification(text, UiTheme.GOLD_LIGHT)
 	hud.show_banner(str(casino.get("name", "")).to_upper(), UiTheme.GOLD, Tuning.UI_BANNER_SECONDS)
 
@@ -496,6 +645,313 @@ func _unhandled_input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 
 
+# --- Co-op ----------------------------------------------------------------------
+
+func _start_net() -> void:
+	if authority:
+		ready_peers.assign([local_pid])
+		_ready_wait_until_msec = Time.get_ticks_msec() + int(READY_WAIT_SECONDS * 1000.0)
+		host.set_validator(&"sit", _validate_sit)
+		host.set_validator(&"give_chips", _validate_give_chips)
+		host.set_validator(&"enter_zone", _validate_enter_zone)
+		_apply_ready(ready_peers)
+	else:
+		# The host built this visit before announcing it.
+		_apply_ready([1, local_pid])
+		host.send_world(1, &"ready", {})
+
+
+## Lets every ready peer receive the synchronizers this peer owns.
+func _apply_ready(pids: Array) -> void:
+	ready_peers.assign(pids)
+	if net_stopped:
+		return
+	for node: Node in _owned_synced():
+		NetSync.show_to(node, ready_peers, local_pid)
+	NetLog.line("ready_peers", {"pids": ready_peers})
+
+
+## The visit is over: stop sending, so nothing is in flight for nodes the
+## other peers are about to free when the next visit starts.
+func _stop_net_sync() -> void:
+	if net_stopped:
+		return
+	net_stopped = true
+	for node: Node in _owned_synced():
+		NetSync.hide_from(node, ready_peers, local_pid)
+	NetLog.line("sync_stopped", {})
+
+
+## The synced nodes this peer sends: its own player, plus every NPC on the host.
+func _owned_synced() -> Array[Node]:
+	var owned: Array[Node] = []
+	if players.has(local_pid):
+		owned.append(players[local_pid])
+	if authority:
+		owned.append_array(guards)
+		owned.append_array(cameras)
+		if crowd != null:
+			owned.append(crowd)
+	return owned
+
+
+## Host: every crew member's peer has built the visit (or we gave up waiting).
+func _peers_ready() -> bool:
+	if not (online and authority):
+		return true
+	if Time.get_ticks_msec() >= _ready_wait_until_msec:
+		return true
+	for pid: int in players:
+		if not ready_peers.has(pid):
+			return false
+	return true
+
+
+func _on_world_message(kind: StringName, data: Dictionary, from_pid: int) -> void:
+	var from_host: bool = from_pid == 1
+	match kind:
+		&"ready":
+			if authority and not ready_peers.has(from_pid) and players.has(from_pid):
+				var pids: Array = ready_peers.duplicate()
+				pids.append(from_pid)
+				_apply_ready(pids)
+				host.send_world(0, &"ready_peers", {"pids": pids})
+		&"ready_peers":
+			if not authority and from_host and data.get("pids") is Array:
+				_apply_ready(data["pids"])
+		&"place":
+			if not authority and from_host and int(data.get("pid", 0)) == local_pid:
+				_apply_place(local_pid, StringName(str(data.get("mode", ""))), data)
+		&"tackle":
+			if authority and _can_reach_guard(from_pid, int(data.get("guard_id", -1)), Tuning.TACKLE_RANGE):
+				_tackle(from_pid, _guard_by_id(int(data.get("guard_id", -1))))
+		&"bump":
+			if authority and _can_reach_guard(from_pid, int(data.get("guard_id", -1)), Tuning.TACKLE_RANGE):
+				_bump(from_pid, _guard_by_id(int(data.get("guard_id", -1))))
+		&"struggle":
+			var g: GuardNPC = _carriers.get(from_pid)
+			if authority and g != null and is_instance_valid(g):
+				g.on_struggle()
+		&"exit":
+			if authority and rung == Tuning.TOP_RUNG:
+				_leave_top(from_pid)
+		&"run_over":
+			if not authority and from_host:
+				_end_visit(OUTCOME_RUN_OVER)
+		&"notice":
+			if from_host:
+				_notify(local_pid, str(data.get("text", "")), UiTheme.LOSS_COLOR)
+		&"probe":
+			if not authority and from_host:
+				_check_probe(data)
+
+
+## Host: moves `pid`'s body. Its owner applies it (a &"place" message to a
+## client; directly for this peer's own player and offline).
+func _place_player(pid: int, mode: StringName, data: Dictionary = {}) -> void:
+	if not online or pid == local_pid:
+		_apply_place(pid, mode, data)
+		return
+	var msg := data.duplicate()
+	msg["pid"] = pid
+	msg["mode"] = mode
+	host.send_world(pid, &"place", msg)
+
+
+func _apply_place(pid: int, mode: StringName, data: Dictionary) -> void:
+	var node: PlayerCharacter = players.get(pid)
+	if node == null or not is_instance_valid(node):
+		return
+	var at: Variant = data.get("at")
+	match mode:
+		&"sit":
+			var seat: Variant = data.get("seat")
+			if seat is Transform3D:
+				node.sit_at(seat)
+				_face_camera(node)
+		&"stand":
+			if node.state == PlayerCharacter.STATE_SEATED:
+				node.stand_up()
+			_reset_camera(node)
+		&"carry":
+			var g := _guard_by_id(int(data.get("guard_id", -1)))
+			if g != null:
+				_carriers[pid] = g
+				node.set_carried(g)
+		&"release":
+			if not authority:
+				_carriers.erase(pid)
+			if node.is_carried() and at is Vector3:
+				node.release(at)
+		&"hide":
+			if not authority:
+				_carriers.erase(pid)
+			node.set_hidden(true)
+			if at is Vector3:
+				node.teleport(at)
+		&"show":
+			node.set_hidden(false)
+			if at is Vector3:
+				node.teleport(at)
+			if bool(data.get("reset_zone", false)):
+				# The sim moved the player's zone; let the map announce the real one.
+				map.reset_zone(node)
+	NetLog.line("placed", {"pid": pid, "mode": mode})
+
+
+## Host: tells `pid` something (a HUD notification on their screen).
+func _notice(pid: int, text: String) -> void:
+	if pid == local_pid or not online:
+		_notify(pid, text, UiTheme.LOSS_COLOR)
+	else:
+		host.send_world(pid, &"notice", {"text": text})
+
+
+## Host: the player's synced body is close enough to guard `guard_id`.
+func _can_reach_guard(pid: int, guard_id: int, reach: float) -> bool:
+	var node: PlayerCharacter = players.get(pid)
+	var g := _guard_by_id(guard_id)
+	if node == null or g == null:
+		return false
+	return Perception.flat_distance(node.global_position, g.global_position) <= reach + NET_REACH_SLACK
+
+
+func _validate_sit(sender: int, args: Array) -> StringName:
+	var node: PlayerCharacter = players.get(sender)
+	var t: TableNode = tables.get(args[1])
+	if node == null or t == null:
+		return FloorSim.NO_REASON
+	var reach: float = t.interactable.get_radius() + Tuning.PLAYER_INTERACT_RADIUS + Tuning.PLAYER_INTERACT_REACH + NET_REACH_SLACK
+	if Perception.flat_distance(node.global_position, t.interactable.global_position) > reach:
+		return &"too_far"
+	# Whether a guard saw them jump tables is the host's call.
+	args[2] = _seen_recently(sender)
+	return FloorSim.NO_REASON
+
+
+func _validate_give_chips(sender: int, args: Array) -> StringName:
+	var from: PlayerCharacter = players.get(sender)
+	var to: PlayerCharacter = players.get(int(args[1]))
+	if from == null or to == null:
+		return FloorSim.UNKNOWN_PLAYER
+	if Perception.flat_distance(from.global_position, to.global_position) > PlayerCharacter.GIVE_RANGE + NET_REACH_SLACK:
+		return &"too_far"
+	return FloorSim.NO_REASON
+
+
+func _validate_enter_zone(sender: int, args: Array) -> StringName:
+	var node: PlayerCharacter = players.get(sender)
+	if node == null:
+		return FloorSim.UNKNOWN_PLAYER
+	var at := map.to_local(node.global_position)
+	for zone: CasinoZone in map.zones:
+		if zone.zone_type != int(args[1]) or zone.area_id != StringName(args[2]):
+			continue
+		for r: Rect2 in zone.rects():
+			if r.grow(NET_REACH_SLACK).has_point(Vector2(at.x, at.z)):
+				return FloorSim.NO_REASON
+	return FloorSim.WRONG_ZONE
+
+
+## Host, top rung: the crew walks out (the run ends) once everyone who isn't
+## detained is free on the exit pad.
+func _leave_top(pid: int) -> void:
+	if finished:
+		return
+	var sim := _sim()
+	if sim != null:
+		for other: int in sim.player_ids():
+			var ps := sim.player(other)
+			if ps.status == HR.PlayerStatus.DETAINED:
+				continue
+			if ps.status != HR.PlayerStatus.FREE or ps.zone != HR.ZoneType.EXIT:
+				_notice(pid, "The whole crew has to be at the exit to walk out.")
+				return
+	host.send_world(0, &"run_over", {})
+	_end_visit(OUTCOME_RUN_OVER)
+
+
+func _net_tick(delta: float) -> void:
+	_nameplate_left -= delta
+	if _nameplate_left <= 0.0:
+		_nameplate_left = NAMEPLATE_REFRESH_SECONDS
+		_refresh_nameplates()
+	if not NetLog.enabled or finished:
+		return
+	var now := Time.get_ticks_msec()
+	if not authority and player != null:
+		_trail.append([now, player.global_position])
+		while not _trail.is_empty() and now - int(_trail[0][0]) > 1000:
+			_trail.pop_front()
+	if now < _probe_due_msec:
+		return
+	_probe_due_msec = now + int(PROBE_SECONDS * 1000.0)
+	if authority:
+		_send_probe()
+	elif player != null and player.is_carried():
+		var g: GuardNPC = _carriers.get(local_pid)
+		if g != null and is_instance_valid(g):
+			NetLog.line("carried_follow", {"guard": g.guard_id, "err": player.global_position.distance_to(g.get_carry_point())})
+
+
+func _refresh_nameplates() -> void:
+	for pid: int in players:
+		var node: PlayerCharacter = players[pid]
+		if pid == local_pid or node.nameplate == null:
+			continue
+		var level: int = HeatMeter.level_for(_p_heat(pid))
+		var text := _name_of(pid)
+		match _p_status(pid):
+			HR.PlayerStatus.CARRIED:
+				text += " (grabbed!)"
+			HR.PlayerStatus.ID_CHECK:
+				text += " (ID check)"
+		node.set_nameplate(text, UiTheme.heat_color(level).lightened(0.25))
+
+
+## --net-log, host: guard positions and carry points for the clients to check
+## their puppets against, and how closely a carried client follows its guard.
+func _send_probe() -> void:
+	var guard_pos: Dictionary = {}
+	for g: GuardNPC in guards:
+		guard_pos[g.guard_id] = g.global_position
+	var player_pos: Dictionary = {}
+	for pid: int in players:
+		player_pos[pid] = (players[pid] as PlayerCharacter).global_position
+	host.send_world(0, &"probe", {"guards": guard_pos, "players": player_pos}, false)
+	for pid: int in _carriers:
+		var g: GuardNPC = _carriers[pid]
+		var node: PlayerCharacter = players.get(pid)
+		# Skip the first half second: the client's body is still on its way up.
+		if Time.get_ticks_msec() - int(_grabbed_at.get(pid, 0)) < int(PROBE_SECONDS * 1000.0):
+			continue
+		if pid != local_pid and node != null and g != null and is_instance_valid(g):
+			NetLog.line("carry_track", {"pid": pid, "guard": g.guard_id, "err": node.global_position.distance_to(g.get_carry_point())})
+
+
+## --net-log, client: how far each puppet guard is from the host's position.
+func _check_probe(data: Dictionary) -> void:
+	if finished:
+		return
+	var guard_pos: Variant = data.get("guards")
+	if guard_pos is Dictionary:
+		for id: Variant in guard_pos:
+			var g := _guard_by_id(int(id))
+			var at: Variant = guard_pos[id]
+			if g != null and at is Vector3:
+				NetLog.line("guard_track", {"guard": int(id), "err": Perception.flat_distance(g.global_position, at)})
+	# The host's copy of this player against where it was over the last
+	# second (the probe and the sync both took a trip over the wire).
+	var player_pos: Variant = data.get("players")
+	if player_pos is Dictionary and player != null and (player_pos as Dictionary).has(local_pid):
+		var seen: Variant = player_pos[local_pid]
+		if seen is Vector3:
+			var best := Perception.flat_distance(player.global_position, seen)
+			for entry: Array in _trail:
+				best = minf(best, Perception.flat_distance(entry[1], seen))
+			NetLog.line("self_track", {"err": best})
+
+
 # --- Frame update -------------------------------------------------------------
 
 func _physics_process(delta: float) -> void:
@@ -504,14 +960,17 @@ func _physics_process(delta: float) -> void:
 		return
 	if not npcs_active:
 		_nav_frames += 1
-		if map.navigation_ready() or _nav_frames >= NAV_WAIT_MAX_FRAMES:
+		if (map.navigation_ready() and _peers_ready()) or (_nav_frames >= NAV_WAIT_MAX_FRAMES and _peers_ready()):
 			_activate_npcs()
-	_update_flags()
+	if authority:
+		_update_flags()
 	_sync_outfits()
 	_sync_seated_pose()
 	_sync_input(false)
 	_update_prompt()
 	_animate_alarm()
+	if online:
+		_net_tick(delta)
 	if _finish_left >= 0.0 and not _finish_emitted:
 		_finish_left -= delta
 		if _finish_left <= 0.0:
@@ -546,28 +1005,22 @@ func _pit_boss_sees(pid: int) -> bool:
 
 
 func _sync_outfits() -> void:
-	var sim := _sim()
-	if sim == null:
-		return
 	for pid: int in players:
-		var ps := sim.player(pid)
-		if ps == null:
+		var look := _outfit_dict(pid)
+		if look.is_empty():
 			continue
-		var worn: Outfit = _worn.get(pid)
-		if worn == null or not worn.equals(ps.outfit):
-			_worn[pid] = ps.outfit.copy()
-			(players[pid] as PlayerCharacter).set_outfit(ps.outfit.copy())
+		if look != _worn.get(pid, {}):
+			_worn[pid] = look
+			(players[pid] as PlayerCharacter).set_outfit(Outfit.from_dict(look))
 
 
 func _sync_seated_pose() -> void:
-	var sim := _sim()
 	for pid: int in players:
 		var node: PlayerCharacter = players[pid]
-		if node.state != PlayerCharacter.STATE_SEATED:
+		if node.puppet or node.state != PlayerCharacter.STATE_SEATED:
 			continue
-		var ps := sim.player(pid) if sim != null else null
-		var t: TableNode = tables.get(ps.table_id) if ps != null else null
-		node.set_playing((ps != null and ps.in_round()) or (t != null and t.is_animating()))
+		var t: TableNode = tables.get(_p_table(pid))
+		node.set_playing(_p_in_round(pid) or (t != null and t.is_animating()))
 
 
 func _sync_input(force: bool) -> void:
@@ -583,8 +1036,8 @@ func _sync_input(force: bool) -> void:
 func _input_wanted() -> bool:
 	if finished or input_blocked:
 		return false
-	var ps := _ps(LOCAL_PID)
-	if ps == null or ps.status == HR.PlayerStatus.DETAINED or ps.status == HR.PlayerStatus.ON_CURB:
+	var status := _p_status(local_pid)
+	if status < 0 or status == HR.PlayerStatus.DETAINED or status == HR.PlayerStatus.ON_CURB:
 		return false
 	if bet_panel != null and bet_panel.is_open():
 		return false
@@ -639,21 +1092,41 @@ func _on_tackle_requested(target: Node3D, node: PlayerCharacter) -> void:
 	var g := target as GuardNPC
 	if g == null or finished:
 		return
+	if authority:
+		_tackle(node.pid, g)
+	else:
+		host.send_world(1, &"tackle", {"guard_id": g.guard_id})
+
+
+## Host: `tackler` tackled the guard: it goes down; a teammate it carried is
+## free (and the tackler goes straight to Wanted), else it's a bump.
+func _tackle(tackler: int, g: GuardNPC) -> void:
+	if g == null or finished:
+		return
 	var carried: int = g.carrying_pid()
 	g.stun()
-	if carried >= 0 and carried != node.pid:
-		var res: Dictionary = host.request_freed(carried, node.pid)
-		if not bool(res.get("ok", false)):
-			_report_failure(res, node.pid)
+	if carried >= 0 and carried != tackler:
+		var res: Dictionary = host.request_freed(carried, tackler)
+		if not bool(res.get("ok", false)) and StringName(str(res.get("reason", ""))) != FloorSim.FINISHED:
+			_notice(tackler, UiTheme.reason_text(StringName(str(res.get("reason", "")))))
 		return
-	host.request_distraction(node.pid, HR.Distraction.BUMP_GUARD, g.global_position)
+	host.request_distraction(tackler, HR.Distraction.BUMP_GUARD, g.global_position)
 
 
 func _on_bumped(guard: Node3D, node: PlayerCharacter) -> void:
 	var g := guard as GuardNPC
 	if g == null or finished:
 		return
-	var res: Dictionary = host.request_distraction(node.pid, HR.Distraction.BUMP_GUARD, g.global_position)
+	if authority:
+		_bump(node.pid, g)
+	else:
+		host.send_world(1, &"bump", {"guard_id": g.guard_id})
+
+
+func _bump(pid: int, g: GuardNPC) -> void:
+	if g == null or finished:
+		return
+	var res: Dictionary = host.request_distraction(pid, HR.Distraction.BUMP_GUARD, g.global_position)
 	if bool(res.get("ok", false)):
 		g.stun()
 
@@ -662,12 +1135,7 @@ func _on_throw_chips(target: Vector3, node: PlayerCharacter) -> void:
 	if finished:
 		return
 	var at := Vector3(target.x, node.global_position.y, target.z)
-	var res: Dictionary = host.request_distraction(node.pid, HR.Distraction.THROW_CHIPS, at)
-	if bool(res.get("ok", false)):
-		_chip_burst(at)
-		_notify(node.pid, "Chips everywhere! (-%s)" % UiTheme.chips(int(res.get("cost", 0))), UiTheme.GOLD_LIGHT)
-	else:
-		_report_failure(res, node.pid)
+	host.request_distraction(node.pid, HR.Distraction.THROW_CHIPS, at)
 
 
 func _on_knock_over_requested(target: Interactable, node: PlayerCharacter) -> void:
@@ -675,29 +1143,116 @@ func _on_knock_over_requested(target: Interactable, node: PlayerCharacter) -> vo
 
 
 func _on_struggled(node: PlayerCharacter) -> void:
+	if not authority:
+		host.send_world(1, &"struggle", {})
+		return
 	var g: GuardNPC = _carriers.get(node.pid)
 	if g != null and is_instance_valid(g):
 		g.on_struggle()
 
 
 func _on_stand_requested(node: PlayerCharacter) -> void:
-	if node.pid == LOCAL_PID and bet_panel != null and bet_panel.is_open():
+	if node.pid == local_pid and bet_panel != null and bet_panel.is_open():
 		return
 	host.request_stand(node.pid)
 
 
+func _on_give_chips_requested(mate: PlayerCharacter, node: PlayerCharacter) -> void:
+	if finished or mate == null:
+		return
+	var run: Dictionary = host.snapshot().get("run", {})
+	var pocket: int = int(_pv(node.pid).get("pocket", 0)) if _sim() == null else _sim().player(node.pid).wallet.pocket
+	var amount: int = mini(pocket, maxi(int(run.get("min_bet", 1)), int(float(pocket) * GIVE_CHIPS_SHARE)))
+	if amount <= 0:
+		_notify(node.pid, UiTheme.reason_text(FloorSim.NOT_ENOUGH), UiTheme.LOSS_COLOR)
+		return
+	_giving = true
+	host.request_give_chips(node.pid, mate.pid, amount)
+
+
 func _on_bet_leave() -> void:
-	host.request_stand(LOCAL_PID)
+	host.request_stand(local_pid)
 
 
 func _on_zone_entered(body: Node3D, zone: CasinoZone) -> void:
 	var node := body as PlayerCharacter
 	if node == null or not players.has(node.pid) or finished:
 		return
+	# Each peer reports only its own player's zone (the host validates it).
+	if online and node.pid != local_pid:
+		return
 	host.request_enter_zone(node.pid, zone.zone_type, zone.area_id)
 
 
-# --- Guard and camera signals -----------------------------------------------------
+# --- Request answers --------------------------------------------------------------
+
+## Feedback for this peer's own requests (on the host and offline during the
+## call, on a client when the answer arrives).
+func _on_request_done(request: StringName, args: Array, res: Dictionary) -> void:
+	if finished:
+		return
+	var who: int = int(args[0]) if not args.is_empty() and args[0] is int else local_pid
+	if who != local_pid:
+		return
+	var ok: bool = bool(res.get("ok", false))
+	match request:
+		&"sit", &"tear_poster":
+			_report_failure(res, who)
+		&"deface_poster":
+			if ok:
+				_notify(who, "You drew over the %s on the poster." % OutfitCatalog.slot_name(int(res.get("slot", 0))).to_lower(), UiTheme.WIN_COLOR)
+			else:
+				_report_failure(res, who)
+		&"distraction":
+			var kind: int = int(args[1]) if args.size() > 1 else -1
+			if kind == HR.Distraction.BUMP_GUARD:
+				return
+			if ok and kind == HR.Distraction.THROW_CHIPS:
+				_notify(who, "Chips everywhere! (-%s)" % UiTheme.chips(int(res.get("cost", 0))), UiTheme.GOLD_LIGHT)
+			else:
+				_report_failure(res, who)
+		&"give_chips":
+			if not _giving:
+				return
+			_giving = false
+			if ok:
+				_notify(who, "Handed %s chips to %s." % [UiTheme.chips(int(args[2])), _name_of(int(args[1]))], UiTheme.WIN_COLOR)
+			else:
+				_report_failure(res, who)
+		&"try_climb":
+			_on_climb_answer(res)
+
+
+func _on_climb_answer(res: Dictionary) -> void:
+	if bool(res.get("ok", false)):
+		return
+	var reason: StringName = StringName(str(res.get("reason", "")))
+	match reason:
+		FloorSim.CANT_CLIMB:
+			var run: Dictionary = host.snapshot().get("run", {})
+			var buy_in: int = int(run.get("buy_in", 0))
+			var bank: int = int(run.get("bank", 0))
+			_notify(local_pid, "Bank %s more chips to climb (buy-in %s)." % [UiTheme.chips(maxi(0, buy_in - bank)), UiTheme.chips(buy_in)], UiTheme.LOSS_COLOR)
+		FloorSim.NOT_AT_EXIT:
+			if _p_zone(local_pid) != HR.ZoneType.EXIT:
+				_notify(local_pid, "Step onto the EXIT pad to leave.", UiTheme.LOSS_COLOR)
+			else:
+				_notify(local_pid, "The whole crew has to be at the exit to climb.", UiTheme.LOSS_COLOR)
+		FloorSim.NO_STAKE:
+			_notify(local_pid, no_stake_text(res), UiTheme.LOSS_COLOR)
+		_:
+			_report_failure(res, local_pid)
+
+
+## What to tell the crew when try_climb refuses with NO_STAKE ({to, stake}):
+## the buy-in would leave nothing to bet with upstairs.
+static func no_stake_text(res: Dictionary) -> String:
+	var to: int = int(res.get("to", Tuning.TOP_RUNG))
+	var stake: int = maxi(1, int(res.get("stake", CasinoLadder.casino(to).get("min_bet", 1))))
+	return "Keep at least %s chips in a pocket (or the bank) to cover a bet at %s." % [UiTheme.chips(stake), str(CasinoLadder.casino(to).get("name", "the next casino"))]
+
+
+# --- Guard and camera signals (authority) ------------------------------------------
 
 func _on_guard_saw(guard: GuardNPC, pid: int, running: bool) -> void:
 	_seen_at[pid] = _time
@@ -730,19 +1285,16 @@ func _on_guard_grabbed(guard: GuardNPC, pid: int) -> void:
 	if not bool(res.get("ok", false)):
 		return
 	_carriers[pid] = guard
+	_grabbed_at[pid] = Time.get_ticks_msec()
 	_provider_dirty = true
-	var node: PlayerCharacter = players.get(pid)
-	if node != null:
-		node.set_carried(guard)
+	_place_player(pid, &"carry", {"guard_id": guard.guard_id})
 
 
 func _on_guard_delivered(guard: GuardNPC, pid: int) -> void:
 	var res: Dictionary = host.request_reach_back_room(pid)
 	if not bool(res.get("ok", false)):
 		# The sim had already let them go: put the node down.
-		var node: PlayerCharacter = players.get(pid)
-		if node != null and node.is_carried():
-			node.release(_drop_point(guard))
+		_place_player(pid, &"release", {"at": _drop_point(guard)})
 		_carriers.erase(pid)
 
 
@@ -785,15 +1337,15 @@ func _on_camera_spotted(_camera: SecurityCamera, pid: int) -> void:
 
 func _on_sim_event(kind: StringName, data: Dictionary) -> void:
 	var pid: int = int(data.get("pid", 0))
-	var node: PlayerCharacter = players.get(pid)
 	match kind:
 		&"status":
 			_provider_dirty = true
 		&"seated":
+			if not authority:
+				return
 			var t: TableNode = tables.get(StringName(str(data.get("table_id", ""))))
-			if node != null and t != null:
-				node.sit_at(t.seat_transform(_seat_index(pid, t.table_id)))
-				_face_camera(node)
+			if players.has(pid) and t != null:
+				_place_player(pid, &"sit", {"seat": t.seat_transform(_seat_index(pid, t.table_id))})
 				# A seated body stops touching zones (collision off) and a stool
 				# may stand in the aisle: sitting puts the player in the table's
 				# game area, so its area-change cool-off lands now, not when
@@ -801,10 +1353,8 @@ func _on_sim_event(kind: StringName, data: Dictionary) -> void:
 				var zone_type: int = HR.ZoneType.SLOTS if t.game_type == HR.GameType.SLOTS else HR.ZoneType.TABLES
 				host.request_enter_zone(pid, zone_type, t.area_id)
 		&"stood":
-			if node != null and node.state == PlayerCharacter.STATE_SEATED:
-				node.stand_up()
-			if node != null:
-				_reset_camera(node)
+			if authority and players.has(pid):
+				_place_player(pid, &"stand")
 		&"bet":
 			_on_bet(pid, data)
 		&"hand":
@@ -820,47 +1370,56 @@ func _on_sim_event(kind: StringName, data: Dictionary) -> void:
 		&"noise":
 			_on_noise(data)
 		&"crowd_rush":
-			if crowd != null:
+			if authority and crowd != null:
 				var at: Variant = data.get("position", Vector3.ZERO)
 				crowd.rush_to(at if at is Vector3 else Vector3.ZERO, float(data.get("radius", Tuning.THROW_CHIPS_BLOCK_RADIUS)), float(data.get("seconds", Tuning.THROW_CHIPS_BLOCK_SECONDS)))
 		&"poster", &"poster_removed", &"poster_defaced":
 			_refresh_posters()
-			_refresh_poster_matches()
+			if authority:
+				_refresh_poster_matches()
 		&"outfit":
-			_refresh_poster_matches()
+			if authority:
+				_refresh_poster_matches()
 		&"id_result":
-			var g := _guard_by_id(int(data.get("guard_id", -1)))
-			if g != null:
-				g.set_id_check_result(pid, bool(data.get("passed", false)))
+			if authority:
+				var g := _guard_by_id(int(data.get("guard_id", -1)))
+				if g != null:
+					g.set_id_check_result(pid, bool(data.get("passed", false)))
 		&"freed":
 			_provider_dirty = true
+			if not authority:
+				return
 			var carrier: GuardNPC = _carriers.get(pid)
 			_carriers.erase(pid)
-			if node != null and node.is_carried():
-				node.release(_drop_point(carrier) if carrier != null and is_instance_valid(carrier) else _floor_under(node))
+			var node: PlayerCharacter = players.get(pid)
+			if node != null:
+				var at: Vector3 = _drop_point(carrier) if carrier != null and is_instance_valid(carrier) else _floor_under(node)
+				_place_player(pid, &"release", {"at": at})
 		&"detained":
+			if not authority:
+				return
 			_carriers.erase(pid)
-			if node != null:
-				node.set_hidden(true)
-				node.teleport(map.to_global(map.back_room_point))
+			if players.has(pid):
+				_place_player(pid, &"hide", {"at": map.to_global(map.back_room_point)})
 		&"rejoined":
-			if node != null:
+			if authority and players.has(pid):
 				var from: StringName = StringName(str(data.get("from", "")))
+				var spawn: StringName = StringName(str(data.get("spawn", "")))
 				var at: Vector3 = map.to_global(map.back_room_release_point)
-				if from == &"curb" and not map.spawn_points.is_empty():
-					at = map.to_global(map.spawn_points[(pid - 1) % map.spawn_points.size()])
-				node.set_hidden(false)
-				node.teleport(at)
-				# The sim reset the player's zone; let the map announce the real one.
-				map.reset_zone(node)
+				if (from == &"curb" or spawn == &"entrance") and not map.spawn_points.is_empty():
+					at = map.to_global(map.spawn_points[posmod(pid - 1, map.spawn_points.size())])
+				_place_player(pid, &"show", {"at": at, "reset_zone": true})
 		&"curb":
-			_on_curb()
+			if authority:
+				_on_curb()
 		&"forger_moved":
 			_move_forger(StringName(str(data.get("location", ""))))
 		&"thrown_out":
 			_end_visit(&"thrown_out")
 		&"climbed":
 			_end_visit(&"climbed")
+		&"player_left":
+			remove_player(pid)
 
 
 func _on_bet(pid: int, data: Dictionary) -> void:
@@ -871,7 +1430,7 @@ func _on_bet(pid: int, data: Dictionary) -> void:
 		return
 	# play_result also strobes the loud ones (big wheel, jackpot).
 	t.play_result(result)
-	if pid == LOCAL_PID and bool(data.get("round_over", true)) and bool(result.get("won", false)) and int(result.get("net", 0)) > 0:
+	if pid == local_pid and bool(data.get("round_over", true)) and bool(result.get("won", false)) and int(result.get("net", 0)) > 0:
 		_celebrate[table_id] = true
 
 
@@ -884,13 +1443,21 @@ func _on_result_shown(table_id: StringName) -> void:
 			player.emote(&"celebrate", Tuning.DIRECTOR_CELEBRATE_SECONDS)
 
 
+## Guards in earshot hear it (host); every peer sees the ring, a knocked
+## tray falling and thrown chips flying.
 func _on_noise(data: Dictionary) -> void:
 	var pos: Variant = data.get("position")
 	if not (pos is Vector3):
 		return
-	for g: GuardNPC in guards:
-		g.hear(data)
+	if authority:
+		for g: GuardNPC in guards:
+			g.hear(data)
 	var kind: StringName = StringName(str(data.get("kind", "")))
+	match kind:
+		&"knock_over":
+			_topple_tray_near(pos)
+		&"throw_chips":
+			_chip_burst(pos, players.get(int(data.get("pid", 0))))
 	if kind != &"fire_alarm":
 		_noise_ring(pos, minf(float(data.get("radius", 4.0)), Tuning.DIRECTOR_NOISE_RING_MAX_RADIUS))
 
@@ -898,10 +1465,8 @@ func _on_noise(data: Dictionary) -> void:
 func _on_curb() -> void:
 	var i := 0
 	for pid: int in players:
-		var node: PlayerCharacter = players[pid]
 		_carriers.erase(pid)
-		node.set_hidden(false)
-		node.teleport(map.to_global(map.curb_point) + Vector3(0.9 * float(i), 0.0, 0.0))
+		_place_player(pid, &"show", {"at": map.to_global(map.curb_point) + Vector3(0.9 * float(i), 0.0, 0.0)})
 		i += 1
 	_provider_dirty = true
 
@@ -912,9 +1477,12 @@ func _end_visit(p_outcome: StringName) -> void:
 	finished = true
 	outcome = p_outcome
 	_finish_left = maxf(visit_end_delay, 0.0)
+	if online:
+		_stop_net_sync()
 	_sync_input(true)
 	if hud != null:
 		hud.set_prompt("")
+	NetLog.line("visit_end", {"outcome": p_outcome, "rung": rung})
 
 
 func _set_fire_alarm(active: bool) -> void:
@@ -928,9 +1496,13 @@ func _set_fire_alarm(active: bool) -> void:
 
 
 func _refresh_posters() -> void:
+	if map == null:
+		return
 	var sim := _sim()
-	if sim != null and map != null:
+	if sim != null:
 		map.show_posters(sim.posters_here())
+	elif host != null:
+		map.show_posters(host.snapshot().get("posters", []))
 
 
 func _refresh_poster_matches() -> void:
@@ -947,9 +1519,20 @@ func _refresh_poster_matches() -> void:
 func _knock_over(pid: int, target: Interactable) -> void:
 	if finished or target == null or not target.enabled:
 		return
-	var res: Dictionary = host.request_distraction(pid, HR.Distraction.KNOCK_OVER, target.global_position)
-	if not bool(res.get("ok", false)):
-		_report_failure(res, pid)
+	# The &"noise" event knocks the tray over on every peer.
+	host.request_distraction(pid, HR.Distraction.KNOCK_OVER, target.global_position)
+
+
+## Knocks over the enabled tray at `at` (where a knock_over noise came from).
+func _topple_tray_near(at: Vector3) -> void:
+	var target: Interactable = null
+	var best := 1.0
+	for it: Interactable in map.interactables_of(&"tray"):
+		var d := it.global_position.distance_to(at)
+		if it.enabled and d <= best:
+			target = it
+			best = d
+	if target == null:
 		return
 	target.enabled = false
 	var prop := target.get_parent() as Node3D
@@ -965,26 +1548,14 @@ func _knock_over(pid: int, target: Interactable) -> void:
 
 func _use_exit(pid: int) -> void:
 	if rung == Tuning.TOP_RUNG:
-		_end_visit(OUTCOME_RUN_OVER)
+		if not online:
+			_end_visit(OUTCOME_RUN_OVER)
+		elif authority:
+			_leave_top(pid)
+		else:
+			host.send_world(1, &"exit", {})
 		return
-	var res: Dictionary = host.request_try_climb()
-	if bool(res.get("ok", false)):
-		return
-	var reason: StringName = StringName(str(res.get("reason", "")))
-	match reason:
-		FloorSim.CANT_CLIMB:
-			var run: Dictionary = host.snapshot().get("run", {})
-			var buy_in: int = int(run.get("buy_in", 0))
-			var bank: int = int(run.get("bank", 0))
-			_notify(pid, "Bank %s more chips to climb (buy-in %s)." % [UiTheme.chips(maxi(0, buy_in - bank)), UiTheme.chips(buy_in)], UiTheme.LOSS_COLOR)
-		FloorSim.NOT_AT_EXIT:
-			var ps := _ps(pid)
-			if ps != null and ps.zone != HR.ZoneType.EXIT:
-				_notify(pid, "Step onto the EXIT pad to leave.", UiTheme.LOSS_COLOR)
-			else:
-				_notify(pid, "The whole crew has to be at the exit to climb.", UiTheme.LOSS_COLOR)
-		_:
-			_report_failure(res, pid)
+	host.request_try_climb()
 
 
 ## Tells the player why a request failed (a HUD notification).
@@ -1001,17 +1572,17 @@ func _report_failure(res: Dictionary, pid: int) -> void:
 
 
 func _notify(pid: int, text: String, color: Color = UiTheme.CREAM) -> void:
-	if hud != null and pid == LOCAL_PID and text != "":
+	if hud != null and pid == local_pid and text != "":
 		hud.push_notification(text, color)
 
 
 # --- Effects ----------------------------------------------------------------------
 
-func _chip_burst(at: Vector3) -> void:
+func _chip_burst(at: Vector3, thrower: PlayerCharacter = null) -> void:
 	var colors: Array[Color] = [UiTheme.CHIP_RED, UiTheme.CHIP_BLUE, UiTheme.CHIP_GREEN, UiTheme.CHIP_BLACK, UiTheme.GOLD]
 	var rng := RandomNumberGenerator.new()
 	rng.seed = hash(at)
-	var from := player.global_position + Vector3.UP * 1.3 if player != null else at + Vector3.UP * 1.3
+	var from := thrower.global_position + Vector3.UP * 1.3 if thrower != null and is_instance_valid(thrower) else at + Vector3.UP * 1.3
 	for i in Tuning.DIRECTOR_THROW_CHIPS:
 		var chip := Primitives.cylinder(0.1, 0.035, colors[i % colors.size()], 10)
 		_fx_root.add_child(chip)
@@ -1064,6 +1635,78 @@ func _ps(pid: int) -> PlayerState:
 	return sim.player(pid) if sim != null else null
 
 
+## A client's view of a player: its entry in the host's snapshot ({} if none).
+func _pv(pid: int) -> Dictionary:
+	if host == null:
+		return {}
+	return (host.snapshot().get("players", {}) as Dictionary).get(pid, {})
+
+
+## HR.PlayerStatus of `pid` (−1 if unknown).
+func _p_status(pid: int) -> int:
+	var ps := _ps(pid)
+	if ps != null:
+		return ps.status
+	var p := _pv(pid)
+	return int(p.get("status", HR.PlayerStatus.FREE)) if not p.is_empty() else -1
+
+
+func _p_table(pid: int) -> StringName:
+	var ps := _ps(pid)
+	if ps != null:
+		return ps.table_id
+	return StringName(str(_pv(pid).get("table_id", "")))
+
+
+func _p_zone(pid: int) -> int:
+	var ps := _ps(pid)
+	if ps != null:
+		return ps.zone
+	return int(_pv(pid).get("zone", HR.ZoneType.ENTRANCE))
+
+
+func _p_heat(pid: int) -> float:
+	var ps := _ps(pid)
+	if ps != null:
+		return ps.heat.value
+	return float(_pv(pid).get("heat", 0.0))
+
+
+func _p_in_round(pid: int) -> bool:
+	var ps := _ps(pid)
+	if ps != null:
+		return ps.in_round()
+	return StringName(str(_pv(pid).get("round", ""))) != &""
+
+
+func _outfit_dict(pid: int) -> Dictionary:
+	var ps := _ps(pid)
+	if ps != null:
+		return ps.outfit.to_dict()
+	return _pv(pid).get("outfit", {})
+
+
+func _name_of(pid: int) -> String:
+	var ps := _ps(pid)
+	if ps != null:
+		return ps.display_name
+	return str(_pv(pid).get("name", host.player_names.get(pid, "Player %d" % pid) if host != null else "Player %d" % pid))
+
+
+func _fire_alarm_active() -> bool:
+	var sim := _sim()
+	if sim != null:
+		return sim.fire_alarm_active()
+	return bool(host.snapshot().get("fire_alarm", false)) if host != null else false
+
+
+func _forger_location() -> StringName:
+	var sim := _sim()
+	if sim != null:
+		return sim.forger.location()
+	return StringName(str(host.snapshot().get("forger_location", ""))) if host != null else &""
+
+
 func _seen_recently(pid: int) -> bool:
 	return _time - float(_seen_at.get(pid, -INF)) <= Tuning.DIRECTOR_RUN_FLAG_HOLD_SECONDS
 
@@ -1114,7 +1757,8 @@ func _floor_under(node: Node3D) -> Vector3:
 func _guard_lines() -> Array:
 	var out: Array = []
 	for g: GuardNPC in guards:
-		out.append("G%d %-10s %-12s carry %d" % [g.guard_id, str(SECURITY_NAMES.get(g.security_type, "?")), g.brain.debug_label, g.carrying_pid()])
+		var label: String = g.brain.debug_label if not g.puppet else GuardBrain.name_of(g.get_state())
+		out.append("G%d %-10s %-12s carry %d" % [g.guard_id, str(SECURITY_NAMES.get(g.security_type, "?")), label, g.carrying_pid()])
 	for c: SecurityCamera in cameras:
 		out.append("C%d watching %s" % [c.camera_id, str(c.watched_pids())])
 	return out

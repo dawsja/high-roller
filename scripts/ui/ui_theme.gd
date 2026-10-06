@@ -102,6 +102,13 @@ const _REASON_TEXT := {
 	&"burned": "That ID is burned: security knows it's fake.",
 	&"flagged": "That name is flagged: it won more than its cap.",
 	&"spotted": "The guard spotted your cheap fake on sight!",
+	&"pending": "Waiting for the host...",
+	&"host_only": "Only the host can do that.",
+	&"not_your_player": "That's not you.",
+	&"bad_args": "The host didn't understand that.",
+	&"unknown_request": "The host didn't understand that.",
+	&"not_connected": "Not connected to the host.",
+	&"too_far": "You're too far away.",
 }
 
 static var _theme: Theme = null

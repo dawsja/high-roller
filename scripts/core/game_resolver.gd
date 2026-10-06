@@ -180,7 +180,7 @@ static func settle(r: BetResult, table: TableState, won: bool, thrown: bool, pay
 		table.record_loss(r.pid)
 		r.streak = 0
 		r.payout = 0
-		r.heat = Tuning.LOSE_ON_PURPOSE_HEAT if thrown else 0.0
+		r.heat = HeatRules.lose_on_purpose_heat(r.bet, max_bet) if thrown else 0.0
 	r.net = r.payout - r.bet
 
 

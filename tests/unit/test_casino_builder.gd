@@ -378,3 +378,54 @@ func test_show_posters_updates_every_board() -> void:
 		assert_eq(b.poster_ids, [4] as Array[int], "board %s" % b.board_id)
 	assert_not_null(map.poster_board(&"cashier"))
 	map.free()
+
+
+func test_area_signs_hang_below_the_floor_camera() -> void:
+	for row: Dictionary in Tuning.CASINOS:
+		var map := CasinoBuilder.build(row, 3)
+		var blocks: int = 0
+		for z: CasinoZone in map.zones:
+			if z.zone_type == HR.ZoneType.TABLES or z.zone_type == HR.ZoneType.SLOTS:
+				blocks += 1
+		assert_eq(map.area_signs.size(), blocks, "%s: a sign per game area" % row["id"])
+		# Default third-person eye height: the pivot plus the arm at the default pitch.
+		var eye: float = Tuning.PLAYER_CAMERA_HEIGHT + Tuning.PLAYER_CAMERA_DISTANCE * sin(deg_to_rad(-Tuning.PLAYER_CAMERA_PITCH_DEFAULT_DEGREES))
+		for s: Label3D in map.area_signs:
+			var top: float = s.position.y + float(s.font_size) * s.pixel_size * 0.5
+			assert_lt(top, minf(Tuning.CASINO_WALL_HEIGHT, eye), "%s: %s tops out under the walls and the eye line" % [row["id"], s.text])
+			assert_gt(s.position.y - float(s.font_size) * s.pixel_size * 0.5, Tuning.PLAYER_HEIGHT, "above heads")
+		map.free()
+
+
+func test_area_signs_fade_with_distance_and_out_of_the_hud_band() -> void:
+	assert_almost_eq(CasinoMap.sign_distance_alpha(0.5), 0.0, 0.001, "too close")
+	assert_almost_eq(CasinoMap.sign_distance_alpha(6.0), 1.0, 0.001)
+	assert_almost_eq(CasinoMap.sign_distance_alpha(CasinoMap.SIGN_FAR_HIDDEN + 1.0), 0.0, 0.001, "too far")
+	assert_gt(CasinoMap.sign_distance_alpha(13.0), 0.0)
+	assert_lt(CasinoMap.sign_distance_alpha(13.0), 1.0, "fading")
+
+	var map := CasinoBuilder.build(Tuning.CASINOS[5], 3)
+	tree.root.add_child(map)
+	var cam := Camera3D.new()
+	cam.fov = Tuning.PLAYER_CAMERA_FOV
+	tree.root.add_child(cam)
+	var s: Label3D = map.area_signs[0]
+	# The default third-person view, 6 m short of the sign.
+	cam.global_position = Vector3(s.global_position.x, 3.1, s.global_position.z + 6.0)
+	cam.rotation = Vector3(deg_to_rad(Tuning.PLAYER_CAMERA_PITCH_DEFAULT_DEGREES), 0.0, 0.0)
+	map.fade_signs(cam)
+	assert_true(s.visible, "in view below the HUD band")
+	assert_gt(s.modulate.a, 0.5)
+	# Looking down hard puts the sign up in the top band: it fades away.
+	cam.rotation = Vector3(deg_to_rad(-55.0), 0.0, 0.0)
+	map.fade_signs(cam)
+	var y: float = cam.unproject_position(s.global_position).y / cam.get_viewport().get_visible_rect().size.y
+	assert_lt(y, CasinoMap.SIGN_HUD_BAND, "the sign would sit in the top band")
+	assert_false(s.visible, "hidden over the HUD")
+	# Far away.
+	cam.rotation = Vector3(deg_to_rad(Tuning.PLAYER_CAMERA_PITCH_DEFAULT_DEGREES), 0.0, 0.0)
+	cam.global_position = Vector3(s.global_position.x, 3.1, s.global_position.z + CasinoMap.SIGN_FAR_HIDDEN + 2.0)
+	map.fade_signs(cam)
+	assert_false(s.visible, "too far to matter")
+	cam.free()
+	await _free(map)

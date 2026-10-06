@@ -308,28 +308,66 @@ func test_passed_with_poster_match_not_rechecked_for_same_match() -> void:
 	assert_eq(brain.state, CHECK_ID, "matched again after not matching")
 
 
-func test_id_fail_within_grab_range_grabs() -> void:
-	var brain := _brain_mid_quiz(Vector3(1.0, 0, 0))
-	var intent := brain.update(DT, _ctx(GUARD_AT, [_p(1, Vector3(1.0, 0, 0), SUSPECTED_HEAT)], {"id_check": 2}))
+func test_id_fail_shouts_and_holds_off_before_grabbing() -> void:
+	var player := Vector3(1.0, 0, 0)
+	var brain := _brain_mid_quiz(player)
+	var ctx := _ctx(GUARD_AT, [_p(1, player, SUSPECTED_HEAT)], {"id_check": 2})
+	var intent := brain.update(DT, ctx)
+	assert_eq(intent["action"], &"shout", "a failed check starts with a shout, not a grab")
+	assert_eq(brain.state, CHASE)
+	assert_eq(brain.target_pid, 1)
+	assert_true(brain.is_reacting())
+	assert_true(intent["reacting"])
+	assert_null(intent["move_to"], "stands while reacting")
+	assert_eq(intent["face"], player)
+	# In grab range the whole reaction, but no grab until it is over.
+	var frames := _frames_for(Tuning.ID_FAIL_REACTION_SECONDS)
+	for i in frames - 1:
+		intent = brain.update(DT, _ctx(GUARD_AT, [_p(1, player, SUSPECTED_HEAT)]))
+		assert_eq(intent["action"], &"", "no grab at %d" % i)
+		assert_true(intent["reacting"])
+		assert_eq(brain.state, CHASE)
+	intent = brain.update(DT, _ctx(GUARD_AT, [_p(1, player, SUSPECTED_HEAT)]))
+	assert_false(brain.is_reacting())
 	assert_eq(intent["action"], &"grab")
 	assert_eq(brain.state, CARRY)
-	assert_eq(brain.target_pid, 1)
 	assert_eq(intent["move_to"], BACK)
 	assert_almost_eq(float(intent["speed"]), Tuning.GUARD_CARRY_SPEED)
 
 
-func test_id_fail_outside_grab_range_chases() -> void:
+func test_id_fail_reaction_gives_a_head_start_then_chases() -> void:
 	var player := Vector3(Tuning.GRAB_RANGE + 0.5, 0, 0)
 	var brain := _brain_mid_quiz(player)
 	var intent := brain.update(DT, _ctx(GUARD_AT, [_p(1, player, SUSPECTED_HEAT)], {"id_check": 2}))
 	assert_eq(brain.state, CHASE)
+	assert_eq(intent["action"], &"shout")
+	assert_null(intent["move_to"])
+	# The player runs; the guard stays put for the reaction.
+	var away := player
+	for i in _frames_for(Tuning.ID_FAIL_REACTION_SECONDS) - 1:
+		away += Vector3(Tuning.PLAYER_RUN_SPEED * DT, 0, 0)
+		intent = brain.update(DT, _ctx(GUARD_AT, [_p(1, away, SUSPECTED_HEAT)]))
+		assert_null(intent["move_to"], "still reacting")
+	away += Vector3(Tuning.PLAYER_RUN_SPEED * DT, 0, 0)
+	intent = brain.update(DT, _ctx(GUARD_AT, [_p(1, away, SUSPECTED_HEAT)]))
+	assert_false(intent["reacting"])
 	assert_eq(intent["action"], &"")
-	assert_eq(intent["move_to"], player)
+	assert_eq(intent["move_to"], away)
 	assert_almost_eq(float(intent["speed"]), Tuning.GUARD_RUN_SPEED)
-	# Next frame, caught up: grab.
-	intent = brain.update(DT, _ctx(player - Vector3(1, 0, 0), [_p(1, player, SUSPECTED_HEAT)]))
+	assert_gt(Perception.flat_distance(GUARD_AT, away), Tuning.GRAB_RANGE + Tuning.PLAYER_RUN_SPEED, "a real head start")
+	# Caught up later: grab.
+	intent = brain.update(DT, _ctx(away - Vector3(1, 0, 0), [_p(1, away, SUSPECTED_HEAT)]))
 	assert_eq(intent["action"], &"grab")
 	assert_eq(brain.state, CARRY)
+
+
+func test_reaction_ends_when_the_guard_is_stunned() -> void:
+	var brain := _brain_mid_quiz(Vector3(1.0, 0, 0))
+	brain.update(DT, _ctx(GUARD_AT, [_p(1, Vector3(1.0, 0, 0), SUSPECTED_HEAT)], {"id_check": 2}))
+	assert_true(brain.is_reacting())
+	brain.update(DT, _ctx(GUARD_AT, [], {"stunned": true}))
+	assert_eq(brain.state, STUNNED)
+	assert_false(brain.is_reacting())
 
 
 func test_walking_away_from_check_starts_chase() -> void:
@@ -362,6 +400,63 @@ func test_target_cooling_off_before_ask_drops_check() -> void:
 	brain.update(DT, _ctx(GUARD_AT, [_p(1, Vector3(8, 0, 0), WATCHED_HEAT)]))
 	assert_eq(brain.state, PATROL)
 	assert_eq(brain.target_pid, -1)
+
+
+func test_walk_over_keeps_coming_when_heat_dips_just_under_suspected() -> void:
+	var brain := _brain()
+	var player := Vector3(8, 0, 0)
+	brain.update(DT, _ctx(GUARD_AT, [_p(1, player, SUSPECTED_HEAT)]))
+	assert_eq(brain.state, CHECK_ID)
+	var dipped := Tuning.SUSPECTED_AT - 1.0
+	var intent := _run(brain, 4, _ctx(Vector3(3, 0, 0), [_p(1, player, dipped)]))
+	assert_eq(brain.state, CHECK_ID, "49 Heat doesn't turn him around")
+	assert_eq(brain.target_pid, 1)
+	assert_eq(intent["move_to"], player)
+	intent = brain.update(DT, _ctx(player - Vector3(1.5, 0, 0), [_p(1, player, dipped)]))
+	assert_eq(intent["action"], &"ask_id", "and still asks for ID")
+
+
+func test_walk_over_released_below_walkover_release_at() -> void:
+	var brain := _brain()
+	var player := Vector3(8, 0, 0)
+	brain.update(DT, _ctx(GUARD_AT, [_p(1, player, SUSPECTED_HEAT)]))
+	brain.update(DT, _ctx(GUARD_AT, [_p(1, player, Tuning.WALKOVER_RELEASE_AT)]))
+	assert_eq(brain.state, CHECK_ID, "at the release mark: still coming")
+	brain.update(DT, _ctx(GUARD_AT, [_p(1, player, Tuning.WALKOVER_RELEASE_AT - 0.1)]))
+	assert_eq(brain.state, PATROL)
+	assert_eq(brain.target_pid, -1)
+	_run(brain, 4, _ctx(GUARD_AT, [_p(1, player, Tuning.SUSPECTED_AT - 1.0)]))
+	assert_eq(brain.state, PATROL, "a new walk-over needs Suspected again")
+
+
+func test_crew_wide_cleared_player_is_not_walked_over_to() -> void:
+	var brain := _brain()
+	var player := Vector3(5, 0, 0)
+	_run(brain, 4, _ctx(GUARD_AT, [_p(1, player, SUSPECTED_HEAT, {"cleared": true})]))
+	assert_eq(brain.state, PATROL, "passed another guard's check")
+	_run(brain, 2, _ctx(GUARD_AT, [_p(1, player, SUSPECTED_HEAT, {"cleared": true, "matches_poster": true})]))
+	assert_eq(brain.state, PATROL, "the sim decides when a poster ends the clearance")
+	brain.update(DT, _ctx(GUARD_AT, [_p(1, player, SUSPECTED_HEAT)]))
+	assert_eq(brain.state, CHECK_ID, "clearance over: walk over")
+
+
+func test_cleared_during_walk_over_drops_the_check() -> void:
+	var brain := _brain()
+	var player := Vector3(8, 0, 0)
+	brain.update(DT, _ctx(GUARD_AT, [_p(1, player, SUSPECTED_HEAT)]))
+	assert_eq(brain.state, CHECK_ID)
+	brain.update(DT, _ctx(GUARD_AT, [_p(1, player, SUSPECTED_HEAT, {"cleared": true})]))
+	assert_eq(brain.state, PATROL, "a teammate guard just passed them: no second check")
+	assert_eq(brain.target_pid, -1)
+
+
+func test_cleared_player_is_still_chased_at_wanted() -> void:
+	var brain := _brain()
+	brain.update(DT, _ctx(GUARD_AT, [_p(1, Vector3(6, 0, 0), WANTED_HEAT, {"cleared": true})]))
+	assert_eq(brain.state, CHASE)
+	var undercover := _brain(HR.SecurityType.UNDERCOVER)
+	_run(undercover, 3, _ctx(GUARD_AT, [_p(1, Vector3(6, 0, 0), SUSPECTED_HEAT, {"cleared": true})]))
+	assert_eq(undercover.state, PATROL, "undercover leaves a cleared Suspected player alone too")
 
 
 func test_suspected_target_turning_wanted_during_check_is_chased() -> void:
@@ -965,6 +1060,7 @@ func test_full_run_patrol_check_fail_chase_grab_carry_drop() -> void:
 	assert_eq(intent["action"], &"ask_id")
 	brain.update(DT, _ctx(Vector3(4.5, 0, 0), [_p(1, Vector3(7, 0, 0), SUSPECTED_HEAT)], {"id_check": 2}))
 	assert_eq(brain.state, CHASE)
+	_run(brain, _frames_for(Tuning.ID_FAIL_REACTION_SECONDS) - 1, _ctx(Vector3(4.5, 0, 0), [_p(1, Vector3(7, 0, 0), SUSPECTED_HEAT)]))
 	intent = brain.update(DT, _ctx(Vector3(6.5, 0, 0), [_p(1, Vector3(7, 0, 0), SUSPECTED_HEAT)]))
 	assert_eq(intent["action"], &"grab")
 	brain.update(DT, _ctx(Vector3(0, 0, 0), [_p(1, Vector3(0, 0, 0), SUSPECTED_HEAT, {"available": false})]))
