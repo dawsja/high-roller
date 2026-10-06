@@ -120,7 +120,52 @@ The host rolls the result first; the detail dictionary describes what the table 
 
 ## World layer (phase 1)
 
-Built in a second pass on top of the simulation; see the section added below once it exists.
+Godot nodes that render the simulation and turn input into requests. Single player for now (pid 1), built so phase 2 can turn requests into RPCs to the host.
+
+```
+main.gd ─► TitleScreen ─► CasinoDirector (one per visit) ◄─ SimHost (RunState + FloorSim; the RPC boundary later)
+                              ├─ CasinoMap from CasinoBuilder: geometry, nav, zones, interactables, anchors, poster boards
+                              ├─ TableNode × n, PlayerCharacter(s), GuardNPC × n, SecurityCamera × n, PatronCrowd, forger NPC
+                              └─ UI: Hud, BetPanel, IdQuizPanel, CashierPanel, WardrobePanel, ForgerPanel, menus, DebugOverlay
+```
+
+Rules
+- World nodes never change chips, Heat, IDs or outfits themselves. Gameplay nodes (player, guards, cameras, tables, map) only emit signals and expose methods; `CasinoDirector` wires them to `SimHost` requests and feeds `SimHost.sim_event` back to them and the UI.
+- Dependencies are injected with `setup(...)`; no autoloads, no tree-wide searches.
+- Physics layers: 1 world, 2 player, 3 guard, 4 patron, 5 interactable. Guards and players collide with world, each other and patrons (so a crowd blocks a guard).
+- Input actions are registered in code by `InputSetup.ensure_actions()` (no InputMap in project.godot).
+- Art is graybox low poly built from primitives (`BoxMesh`, `CylinderMesh`, `CapsuleMesh`, `PrismMesh`, `SphereMesh`) with flat `StandardMaterial3D` colors from the casino palette (`Tuning.CASINOS`) and `OutfitCatalog`, on a 2 m grid. Blender assets replace these later.
+
+### Contracts between world modules
+
+`InputSetup` (static, `scripts/world/input_setup.gd`): actions `move_forward/back/left/right` (WASD + arrows), `run` (Shift), `jump` (Space; also struggle while carried), `dive` (Ctrl), `interact` (E, hold for hold-interactions), `tackle` (F), `throw_chips` (G), `knock_over` (Q), `pause` (Esc), `toggle_debug` (F3), `ui_quiz_1/2/3` (1, 2, 3).
+
+`Interactable` (`scripts/world/interactable.gd`, `extends Area3D`, layer 5): `kind: StringName` (`&"table"`, `&"cashier"`, `&"restroom"`, `&"gift_shop"`, `&"forger"`, `&"poster"`, `&"tray"`, `&"fire_alarm"`, `&"laundry_cart"`, `&"staff_locker"`, `&"exit"`, `&"slot_alarm"`), `prompt: String`, `data: Dictionary` (e.g. `{table_id}`, `{poster_id}`), `hold_seconds: float` (0 = press), `enabled: bool`; `signal used(user: Node3D, interactable: Interactable)`; `func use(user: Node3D) -> void`.
+
+`CasinoZone` (`scripts/world/casino_zone.gd`, `extends Area3D`, monitors layer 2): `zone_type: int` (`HR.ZoneType`), `area_id: StringName`; `signal player_entered(player: Node3D, zone: CasinoZone)`.
+
+`CasinoBuilder` (static) `build(casino: Dictionary, seed: int) -> CasinoMap`. `CasinoMap extends Node3D` (add it to the tree, then call `bake_navigation()`):
+`nav_region: NavigationRegion3D`, `zones: Array[CasinoZone]`, `interactables: Array[Interactable]`, `table_anchors: Array[Dictionary]` (`{id: StringName, game_type: int, area_id: StringName, transform: Transform3D}`), `spawn_points: Array[Vector3]` (entrance), `curb_point: Vector3`, `back_room_point: Vector3` (guards carry players here), `back_room_release_point: Vector3`, `exit_point: Vector3`, `patrol_routes: Array` (one `Array[Vector3]` per floor guard; at least `casino.guards`), `pit_boss_posts: Array[Vector3]`, `camera_mounts: Array[Transform3D]`, `patron_points: Array[Vector3]`, `slot_seats: Array[Transform3D]`, `forger_points: Dictionary` (`&"parking_garage"|&"restroom"|&"loading_dock"` → `Vector3`), `poster_boards: Array[PosterBoardNode]`; `bake_navigation() -> void`.
+
+`PosterBoardNode extends Node3D`: `board_id: StringName` (`&"entrance"|&"cashier"|&"security_desk"`), `show_posters(posters: Array) -> void` (array of `WantedPoster.to_dict()`-style dicts; draws outfit color swatches + "WANTED"), each poster gets an `Interactable` kind `&"poster"` with `data.poster_id` (hold to tear, press to deface).
+
+`CharacterModel extends Node3D` (`scripts/world/character_model.gd`): `apply_outfit(outfit: Outfit)`, `apply_uniform(kind: StringName)` (`&"guard"`, `&"pit_boss"`, `&"head_of_security"`, `&"dealer"`, `&"staff"`), `set_pose(pose: StringName)` (`&"idle"`, `&"walk"`, `&"run"`, `&"sit"`, `&"play"`, `&"celebrate"`, `&"carried"`, `&"carry"`, `&"tackle"`, `&"dive"`, `&"tumble"`, `&"jump"`), `set_highlight(color: Color)` (null-ish = off). About 1.8 m tall, feet at origin, faces −Z.
+
+`PlayerCharacter extends CharacterBody3D` (`scripts/world/player_character.gd`, layer 2): `setup(pid: int, is_local: bool, outfit: Outfit)`, `pid`, `model: CharacterModel`, third-person camera rig (only when local); `is_running() -> bool`, `sit_at(seat: Transform3D)`, `stand_up()`, `set_carried(carrier: Node3D)` (follows `carrier.get_carry_point()` until `release(at: Vector3)`), `teleport(pos: Vector3)`, `set_outfit(outfit: Outfit)`, `set_input_enabled(enabled: bool)` (UI panels open), `set_hidden(hidden: bool)`, `tumble()`. Signals: `interact_pressed(target: Interactable)`, `interact_held(target: Interactable)` (after `hold_seconds`), `tackle_requested(target: Node3D)` (F or dive near a guard within `TACKLE_RANGE`), `bumped(guard: Node3D)` (ran into a guard), `throw_chips_requested(position: Vector3)`, `knock_over_requested(target: Interactable)`, `struggled()` (jump while carried), `pause_requested()`.
+
+`GuardNPC extends CharacterBody3D` (`scripts/world/guard_npc.gd`, layer 3): `setup(guard_id: int, security_type: int, patrol: Array[Vector3], back_room: Vector3, players_provider: Callable)` where `players_provider.call() -> Array` of `{pid, node: Node3D, heat: float, matches_poster: bool, staff_uniform: bool, available: bool}`; owns a `GuardBrain` and `NavigationAgent3D`; sees with `Perception.in_vision_cone` + a world-layer raycast; `hear(noise: Dictionary)` (`{position, radius, kind}`), `set_id_check_result(pid: int, passed: bool)`, `stun()`, `on_struggle()`, `alert(pid: int, position: Vector3)` (pit boss radio), `set_fire_alarm(active: bool)`, `get_carry_point() -> Vector3`, `carrying_pid() -> int`. Signals: `saw_player(guard, pid: int, running: bool)` (each physics frame a player is visible), `id_check_requested(guard, pid)`, `grabbed(guard, pid)`, `delivered(guard, pid)` (reached back room), `released(guard, pid)` (stunned while carrying), `state_changed(guard, old, new)`. Shows a floor vision cone tinted by state and an icon above the head. Pit boss: stands at a post, raises gains (`pit_boss_view` flag) and emits `radioed(guard, pid, position)` on a Suspected player. Undercover wears a patron outfit. Head of security is faster.
+
+`SecurityCamera extends Node3D`: `setup(camera_id: int, mount: Transform3D, players_provider: Callable)`; sweeping cone with LOS; signals `watching(camera, pid: int, active: bool)`, `spotted(camera, pid: int)`.
+
+`PatronCrowd extends Node3D`: `setup(points: Array[Vector3], slot_seats: Array[Transform3D], count: int, rng_seed: int)`; low-rate wandering `Patron` bodies (layer 4) in random outfits, some seated at slots; `rush_to(position: Vector3, radius: float, seconds: float)` for thrown chips.
+
+`TableNode extends Node3D` (`scripts/world/table_node.gd`): `setup(table_id: StringName, game_type: int, area_id: StringName, rung: int)`; builds the per-game prop (slot cabinet, high-low card table, upright big wheel, dice table, roulette table, blackjack half-moon) with a dealer `CharacterModel` where relevant and a `Label3D` with `TableGames.display_name`; `interactable: Interactable` (kind `&"table"`, `data.table_id`); `seat_transform() -> Transform3D`; `play_result(result: Dictionary, duration: float)` animates `BetResult.to_dict()` (reels, wheel to segment, dice to faces, ball to number, cards); `show_hand(state: Dictionary)` for high-low/blackjack in progress; `dealer_swap()`; `set_closed(closed: bool)`; `flash_loud()`; `signal result_shown(table_id)`.
+
+`SimHost extends Node` (`scripts/world/sim_host.gd`): owns `run: RunState` and the current `sim: FloorSim`; `start_run(start_rung: int, seed: int, player_names: Dictionary)`, `start_visit() -> FloorSim` (new FloorSim each visit, carrying PlayerStates), ticks the sim in `_physics_process`; `signal sim_event(kind: StringName, data: Dictionary)` re-emits every FloorSim event; one `request_<name>(...)` method per FloorSim request with the same arguments and return value. This is the phase-2 RPC boundary.
+
+UI (`scripts/ui/`): `Hud`, `BetPanel`, `IdQuizPanel`, `CashierPanel`, `WardrobePanel` (restroom stash + gift shop), `ForgerPanel`, `TitleScreen`, `PauseMenu`, `VisitBanner` (thrown out / climbed), `DebugOverlay`. Each is a `Control` built in code with `setup(host: SimHost, pid: int)`, listens to `host.sim_event`, calls `host.request_*`, and emits `closed()` when a modal panel closes.
+
+`CasinoDirector extends Node3D` (`scripts/world/casino_director.gd`): one per visit; builds the map, spawns and wires everything above, provides `players_provider`, forwards noises to guards in earshot, updates poster boards, and emits `visit_finished(outcome: StringName)`. `main.gd` owns `SimHost`, the UI and the title/pause flow, and swaps directors between visits.
 
 ## Tests
 
