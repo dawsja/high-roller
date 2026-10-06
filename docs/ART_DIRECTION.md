@@ -20,10 +20,26 @@ Chunky, toy-like, saturated cartoon. Everything reads at a glance from across th
 
 - A small dot crosshair sits at screen centre. Looking at anything usable within reach (~2.6 m) gives it a bright glowing outline and a small hint label (`[LMB] PLAY`, `[Hold E] Tear down`).
 - **Left mouse** presses whatever you look at. **E** uses or holds things (doors, posters, trays). Keys 1–3 answer the ID quiz. **Tab** raises your fake ID card into view (scroll to swap cards).
-- Every game is a physical machine with a **bet console**: a numeric keypad (0–9, `C`, `000`), a screen showing the bet, min/max and your pocket, quick keys (`MIN`, `½`, `×2`, `MAX`), a big green `PLAY` / `SPIN` / `ROLL` key, and a `THROW` key (lose on purpose). Some machines have more: `CASH OUT`, `HIT` / `STAND`, `HIGHER` / `LOWER`.
+- Every game is a physical machine with a **bet console**: often a panel on its own stand beside the table. It has a numeric keypad (0–9, `C`, `000`), a screen showing the bet big with `Min` and `Max` above it, and a column of orange quick keys (`MIN`, `¼`, `½`, `ALL`, plus `MAX`). A big separate green `PLAY` / `SPIN` / `ROLL` / `DEAL` button sits on the table rail, and a `THROW` key loses on purpose. Some machines have more fat colored keys on the rail: yellow `STAND`, red `HIT` and green `PLAY` for blackjack; `CASH OUT`, `HIGHER` / `LOWER`.
+- A hovered key gets a thick yellow outline, a small pointing-hand cursor and a hint label under it (`BUTTON  [LMB] INTERACT`).
+- Card totals float above the cards as big outlined numbers (e.g. `17` for you, `22` for the dealer). A short instruction plaque is printed on the felt (`Beat the dealer without busting 21`, `Roll the dice and beat the odds`).
 - Standing in a machine's play spot sits you at it in the simulation (Heat, camping, dealer swap). Walking away stands you up.
 - Results play out physically on every peer: reels spin and stop, the wheel and ball spin, dice tumble and settle, cards fly from the shoe and flip. Monitors on stands show the odds, the result and the payout.
 - Other stations are physical too: the cashier cage console, the restroom mirror with an outfit rack, gift-shop shelves with price tags, the forger opening his coat full of IDs, poster boards, drink trays, the fire alarm and the exit door with a buy-in monitor. A guard's ID check is a speech bubble with three answer cards floating in front of you.
+
+## Per-casino notes
+
+- **The Apex** is a rooftop sky casino: a huge glass dome ceiling with a gold lattice of panes showing a bright blue sky, white and gold walls, chandeliers, palm plants and a starry blue carpet with pink cards.
+- **Neon Oasis** and **the Grand Marquee** are the purple neon club look (ref1 and ref4).
+- **Sal's** is a cramped basement with exposed pipes, a laundromat door and one sleepy guard, but it keeps the same cartoon shading and loud colors.
+
+## Plinko
+
+Plinko joins the six games. It is a tall arched cabinet with a peg board (bright green pill pegs on a gold field) and a row of multiplier buckets along the bottom (`24x 6x 2.8x 1.2x 0.5x 0.2x 0.2x 0.5x 1.2x 2.8x 6x 24x`). You press PLAY and a chip drops, bouncing peg to peg along the path the host rolled, into its bucket. The bet console sits on the cabinet's front.
+
+## References
+
+The user's reference screenshots are in the session scratchpad `ref/` folder (`ref1`–`ref8`): keypad console, character and roulette, roulette board, slots, dice in hands, blackjack keys, bet console on a stand, and plinko under the Apex glass dome. Match their vibe with original designs.
 
 ## HUD (2D, minimal)
 
