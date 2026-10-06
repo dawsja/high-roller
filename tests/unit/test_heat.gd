@@ -704,6 +704,14 @@ func test_passive_camera() -> void:
 	assert_almost_eq(HeatRules.passive_rate(bar_ctx), Tuning.CAMERA_HEAT_PER_SECOND + Tuning.OFF_TABLE_HEAT_PER_SECOND)
 
 
+func test_camera_heat_only_from_watched_up() -> void:
+	var cold := {"in_camera_view": true, "heat": Tuning.WATCHED_AT - 0.1}
+	assert_false(HeatRules.passive_rates(cold).has(HeatRules.CAMERA), "Unnoticed: security does nothing")
+	assert_almost_eq(HeatRules.passive_rate(cold), Tuning.FLOOR_DECAY_PER_SECOND)
+	var watched := {"in_camera_view": true, "heat": Tuning.WATCHED_AT}
+	assert_almost_eq(float(HeatRules.passive_rates(watched)[HeatRules.CAMERA]), Tuning.CAMERA_HEAT_PER_SECOND, EPS, "Watched: cameras follow you")
+
+
 func test_passive_running_and_camera_stack() -> void:
 	var ctx := {"zone": HR.ZoneType.TABLES, "running_in_view": true, "in_camera_view": true}
 	var expected := Tuning.RUN_IN_VIEW_HEAT_PER_SECOND + Tuning.CAMERA_HEAT_PER_SECOND + Tuning.FLOOR_DECAY_PER_SECOND

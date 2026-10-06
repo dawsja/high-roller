@@ -106,7 +106,9 @@ static func passive_rate(ctx: Dictionary) -> float:
 ## Only non-zero parts are present. ctx keys (all optional):
 ## `seated_game: int` (−1 = not seated), `seconds_at_table: float`,
 ## `zone: int` (HR.ZoneType, default FLOOR), `running_in_view: bool`,
-## `in_camera_view: bool`.
+## `in_camera_view: bool`, `heat: float` (the player's Heat: cameras only add
+## Heat from Watched up, design doc "Watched: cameras follow you"; without
+## the key the camera always counts).
 ## Seated at slots: SLOT_BLEND (slots never count as camping). Seated anywhere
 ## else: CAMPING once past CAMP_GRACE_SECONDS. Not seated: OFF_TABLE in a bar,
 ## buffet or restroom, otherwise FLOOR_DECAY. RUN_IN_VIEW and CAMERA add on top.
@@ -127,7 +129,7 @@ static func passive_rates(ctx: Dictionary) -> Dictionary:
 			rates[FLOOR_DECAY] = Tuning.FLOOR_DECAY_PER_SECOND
 	if bool(ctx.get("running_in_view", false)):
 		rates[RUN_IN_VIEW] = Tuning.RUN_IN_VIEW_HEAT_PER_SECOND
-	if bool(ctx.get("in_camera_view", false)):
+	if bool(ctx.get("in_camera_view", false)) and float(ctx.get("heat", Tuning.WATCHED_AT)) >= Tuning.WATCHED_AT:
 		rates[CAMERA] = Tuning.CAMERA_HEAT_PER_SECOND
 	return rates
 

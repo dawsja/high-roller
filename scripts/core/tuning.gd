@@ -210,3 +210,263 @@ const ID_QUIZ_DECOY_YEAR_SPREAD := 6
 # --- guards (GuardBrain) ----------------------------------------------------
 ## A guard waiting at a noise or search spot turns its view around this fast.
 const GUARD_LOOK_AROUND_DEGREES_PER_SECOND := 90.0
+
+# --- simulation facade (PlayerState, FloorSim) ------------------------------
+## Extra random outfits in a new player's restroom stash.
+const START_STASH_OUTFITS := 2
+## Grade of the ID every new player starts with.
+const START_ID_GRADE := HR.IdGrade.SOLID
+## Grade of the free ID handed to a player who rejoins (or starts a visit) holding no usable ID.
+const REJOIN_ID_GRADE := HR.IdGrade.CHEAP
+## A poster match adds Heat once per sighting; it re-arms after the player has
+## gone unseen by every guard this long (or changes outfit).
+const POSTER_MATCH_REARM_SECONDS := 10.0
+## Chance a laundry cart / staff locker gives the full staff uniform instead of one random piece.
+const STEAL_UNIFORM_CHANCE := 0.35
+## Seconds before the same player can steal from a cart or locker again.
+const STEAL_COOLDOWN := 30.0
+## The sim fails an unanswered ID check this long after ID_QUIZ_SECONDS (the UI normally expires it first).
+const ID_QUIZ_GRACE_SECONDS := 0.5
+## "Whole crew detained at once" throws out only a crew at least this big; a solo player goes by strikes.
+const CREW_WIPE_MIN_PLAYERS := 2
+
+# --- character_model / input_setup (world) ----------------------------------
+## Seconds a CharacterModel takes to blend from one pose into the next.
+const CHARACTER_POSE_BLEND_SECONDS := 0.18
+## Walk/run cycle: radians of stride phase per metre moved, capped per second.
+const CHARACTER_STRIDE_RADIANS_PER_METER := 3.4
+const CHARACTER_MAX_STRIDE_RATE := 20.0
+## Whole tumble animation: fall over, lie dazed, get back up.
+const CHARACTER_TUMBLE_SECONDS := 1.6
+## The head of security is drawn this much bigger than everyone else.
+const HEAD_OF_SECURITY_MODEL_SCALE := 1.1
+## Gamepad deadzones for the move actions (stick) and everything else.
+const INPUT_STICK_DEADZONE := 0.2
+const INPUT_BUTTON_DEADZONE := 0.5
+
+# --- player_character / camera_rig (world) ----------------------------------
+## Capsule collider (feet at the origin).
+const PLAYER_RADIUS := 0.3
+const PLAYER_HEIGHT := 1.75
+## Ground acceleration and braking (m/s²); the air gets this share of both.
+const PLAYER_ACCELERATION := 45.0
+const PLAYER_BRAKING := 55.0
+const PLAYER_AIR_CONTROL := 0.35
+## How fast the model turns to face where it moves (higher snaps faster).
+const PLAYER_TURN_SHARPNESS := 14.0
+## Falling pulls harder than rising, for a snappy hop.
+const PLAYER_FALL_GRAVITY_MULT := 1.6
+## Jump grace: just after walking off a ledge / pressed just before landing.
+const PLAYER_COYOTE_SECONDS := 0.1
+const PLAYER_JUMP_BUFFER_SECONDS := 0.12
+## Dive: hop at launch, minimum lunge time, belly-slide braking, time lying prone.
+const PLAYER_DIVE_HOP_VELOCITY := 2.2
+const PLAYER_DIVE_SECONDS := 0.3
+const PLAYER_DIVE_SLIDE_BRAKING := 28.0
+const PLAYER_DIVE_RECOVER_SECONDS := 0.6
+## Tackle (F): a short lunge, then the dive's prone recovery. Guards count as
+## "in front" inside this cone.
+const PLAYER_TACKLE_LUNGE_SPEED := 5.5
+const PLAYER_TACKLE_SECONDS := 0.3
+const PLAYER_TACKLE_CONE_DEGREES := 120.0
+## Interact sensor: a sphere this big, centred this far in front of the body.
+const PLAYER_INTERACT_RADIUS := 0.8
+const PLAYER_INTERACT_REACH := 0.7
+## Letting go of a hold-interaction this soon counts as a press (quick action).
+const PLAYER_INTERACT_TAP_SECONDS := 0.3
+## Thrown chips land this far in front of the player.
+const PLAYER_THROW_DISTANCE := 2.5
+## stand_up() steps back from the seat this far.
+const PLAYER_STAND_UP_STEP := 0.7
+## A new bump on the same guard needs this long without touching it first.
+const PLAYER_BUMP_CONTACT_SECONDS := 0.3
+## Third-person camera: pivot height, zoom range, look limits and easing.
+const PLAYER_CAMERA_HEIGHT := 1.55
+const PLAYER_CAMERA_DISTANCE := 4.5
+const PLAYER_CAMERA_MIN_DISTANCE := 2.0
+const PLAYER_CAMERA_MAX_DISTANCE := 7.5
+const PLAYER_CAMERA_ZOOM_STEP := 0.5
+const PLAYER_CAMERA_FOV := 70.0
+const PLAYER_CAMERA_PITCH_DEFAULT_DEGREES := -20.0
+const PLAYER_CAMERA_PITCH_MIN_DEGREES := -70.0
+const PLAYER_CAMERA_PITCH_MAX_DEGREES := 25.0
+const PLAYER_CAMERA_MOUSE_DEGREES_PER_PIXEL := 0.18
+const PLAYER_CAMERA_STICK_DEGREES_PER_SECOND := 180.0
+const PLAYER_CAMERA_FOLLOW_SHARPNESS := 20.0
+const PLAYER_CAMERA_FOLLOW_SHARPNESS_Y := 8.0
+const PLAYER_CAMERA_ZOOM_SHARPNESS := 10.0
+const PLAYER_CAMERA_COLLISION_RADIUS := 0.25
+
+# --- casino_map (CasinoBuilder, CasinoMap, Interactable) --------------------
+## Graybox casino walls (metres). Doorways are open full height; a lintel
+## closes the gap above CASINO_DOOR_HEIGHT.
+const CASINO_WALL_HEIGHT := 3.0
+const CASINO_WALL_THICKNESS := 0.2
+const CASINO_DOOR_HEIGHT := 2.4
+const CASINO_FENCE_HEIGHT := 1.6
+## Navmesh agent the casino floor is baked for (guards, patrons, forger).
+## NAV_CELL_SIZE must match the navigation map's cell size (project default 0.25).
+const NAV_AGENT_RADIUS := 0.4
+const NAV_AGENT_HEIGHT := 1.8
+const NAV_CELL_SIZE := 0.25
+## Default reach of an Interactable's sphere.
+const INTERACT_RADIUS := 1.0
+## Security cameras are mounted this high in the corners of the floor.
+const CAMERA_MOUNT_HEIGHT := 2.8
+## Patron wander points are spread this far apart along the aisles.
+const PATRON_POINT_SPACING := 4.0
+## Patrol routes built beyond one per floor guard (spares for special guards).
+const EXTRA_PATROL_ROUTES := 2
+
+# --- security_and_crowd (GuardNPC, SecurityCamera, Patron, PatronCrowd) -----
+## Guard capsule (feet at the origin), eye height and the point on a player
+## a guard or camera must see (line of sight runs eye -> chest).
+const GUARD_RADIUS := 0.32
+const GUARD_HEIGHT := 1.8
+const GUARD_EYE_HEIGHT := 1.6
+const SIGHT_CHEST_HEIGHT := 1.2
+## How fast a guard turns toward where it walks or looks (higher snaps faster).
+const GUARD_TURN_SHARPNESS := 10.0
+## A carrying guard this close to the back room point has arrived.
+const GUARD_BACK_ROOM_REACH := 1.2
+## NavigationAgent3D settings for guards.
+const GUARD_PATH_DESIRED_DISTANCE := 0.5
+const GUARD_TARGET_DESIRED_DISTANCE := 0.8
+const GUARD_AVOIDANCE_RADIUS := 0.45
+## A moving destination (a chased player) must shift this far before re-pathing.
+const GUARD_REPATH_DISTANCE := 0.35
+## A grab not confirmed by the player becoming unavailable this soon counts as freed.
+const GUARD_GRAB_CONFIRM_SECONDS := 0.5
+## A guard that asked for ID and heard nothing back (the sim refused the
+## check) lets the player go after the quiz time plus this long.
+const GUARD_ID_RESULT_EXTRA_SECONDS := 1.0
+## Radio tips are ignored by a guard already this close to the reported spot
+## (it can look for itself).
+const GUARD_ALERT_MIN_DISTANCE := 3.0
+## Pit boss: stays within this of its post, radios a Suspected+ player at most
+## this often (per player), and slowly looks around its tables.
+const PIT_BOSS_POST_RADIUS := 3.0
+const PIT_BOSS_RADIO_COOLDOWN := 5.0
+const PIT_BOSS_LOOK_DEGREES := 60.0
+const PIT_BOSS_LOOK_PERIOD := 8.0
+## Vision fans are drawn this far above the floor and re-clipped at walls this often.
+const VISION_CONE_HEIGHT := 0.04
+const VISION_CONE_REFRESH_SECONDS := 0.1
+## Security camera: sweep half-angle and full period, downward tilt of the
+## housing, turn rate while following someone, spotted cooldown per player.
+const CAMERA_SWEEP_DEGREES := 40.0
+const CAMERA_SWEEP_SECONDS := 6.0
+const CAMERA_TILT_DEGREES := 30.0
+const CAMERA_TRACK_DEGREES_PER_SECOND := 60.0
+const CAMERA_SPOT_COOLDOWN := 3.0
+## Patrons: capsule, walking and rushing speed, pauses between strolls.
+const PATRON_RADIUS := 0.3
+const PATRON_WALK_SPEED := 1.4
+const PATRON_RUSH_SPEED := 4.5
+const PATRON_PAUSE_MIN := 2.0
+const PATRON_PAUSE_MAX := 6.0
+## Patrons re-check their path / stuck state this often (staggered).
+const PATRON_REPATH_SECONDS := 1.0
+## Share of patrons seated at slot machines (limited by the seats available).
+const PATRON_SEATED_SHARE := 0.35
+## Thrown chips pull patrons from this far; rushers crowd into this share of
+## the rush radius and give up getting there after PATRON_RUSH_MAX_TRAVEL.
+const PATRON_RUSH_RANGE := 15.0
+const PATRON_RUSH_SPREAD := 0.6
+const PATRON_RUSH_MAX_TRAVEL := 5.0
+
+# --- ui (HUD and panels) ----------------------------------------------------
+## The HUD and open panels re-read host.snapshot() this often.
+const UI_REFRESH_SECONDS := 0.1
+## Notification feed: seconds an entry stays, its fade-out, most entries shown.
+const UI_NOTIFY_SECONDS := 4.0
+const UI_NOTIFY_FADE_SECONDS := 0.6
+const UI_NOTIFY_MAX := 6
+## Default time a big center banner stays up.
+const UI_BANNER_SECONDS := 2.0
+## Heat changes at least this big pulse the meter and pop up a delta.
+const UI_HEAT_POPUP_MIN := 0.5
+const UI_HEAT_PULSE_SCALE := 1.12
+const UI_HEAT_PULSE_SECONDS := 0.25
+## At Wanted the Heat meter shakes this many pixels.
+const UI_HEAT_SHAKE_PIXELS := 4.0
+## After a round ends the bet panel locks for this share of the game's round_seconds.
+const UI_RESULT_LOCK_SHARE := 0.6
+## Lock after a mid-round step (winning high-low guess, blackjack hit).
+const UI_HAND_STEP_LOCK_SECONDS := 0.5
+## ID quiz: the pass/fail result shows this long before the panel closes.
+const UI_QUIZ_RESULT_SECONDS := 1.6
+## Cashier preset cash-out amount button.
+const UI_CASHIER_PRESET := 100
+## Visit banner (thrown out / climbed / curb) auto-closes after this.
+const UI_VISIT_BANNER_SECONDS := 5.0
+## Debug overlay refresh interval.
+const UI_DEBUG_REFRESH_SECONDS := 0.25
+
+# --- table_node (world: TableNode, TableProps) --------------------------------
+## play_result with no duration runs this share of the game's round_seconds.
+const TABLE_RESULT_SHARE := 0.6
+## Shortest result animation, whatever duration is asked for.
+const TABLE_RESULT_MIN_SECONDS := 0.2
+## Share of a result animation spent spinning / rolling / dealing before the
+## win or loss flash; the rest holds the result on screen.
+const TABLE_REVEAL_SHARE := 0.75
+## Win/loss flash light: peak energy, reach (m) and fade time.
+const TABLE_FLASH_ENERGY := 2.5
+const TABLE_FLASH_RANGE := 4.0
+const TABLE_FLASH_SECONDS := 0.6
+## Loud results (big wheel, slot jackpot) strobe brighter, wider and longer.
+const TABLE_LOUD_FLASH_ENERGY := 7.0
+const TABLE_LOUD_FLASH_RANGE := 9.0
+const TABLE_LOUD_FLASH_SECONDS := 1.8
+const TABLE_LOUD_FLASH_PULSES := 5
+## The result caption stays up this long after it pops, then fades.
+const TABLE_POP_HOLD_SECONDS := 1.6
+## Chips that burst off the table on a win (loud wins throw more), and how long they fly.
+const TABLE_BURST_CHIPS := 8
+const TABLE_LOUD_BURST_CHIPS := 24
+const TABLE_BURST_SECONDS := 0.8
+## Dealer swap: the whole walk-off / walk-in, then how long the new dealer's cold tint lasts.
+const TABLE_DEALER_SWAP_SECONDS := 2.4
+const TABLE_DEALER_TINT_SECONDS := 4.0
+## Reach of a table's interactable sphere.
+const TABLE_INTERACT_RADIUS := 1.1
+## Whole turns before settling: big wheel, roulette rotor, roulette ball (against the rotor).
+const TABLE_WHEEL_TURNS := 3
+const TABLE_ROULETTE_TURNS := 2
+const TABLE_ROULETTE_BALL_TURNS := 5
+## Slot reels flick through this many symbols per second while spinning.
+const TABLE_REEL_SYMBOLS_PER_SECOND := 18.0
+## Seconds to deal (or flip) one card when show_hand updates a hand.
+const TABLE_DEAL_SECONDS := 0.22
+
+# --- casino_director (world: CasinoDirector, main) ----------------------------
+## A player seen by guards is reported to the sim (report_seen) at most this often.
+const DIRECTOR_REPORT_SECONDS := 0.25
+## running_in_view (and "a guard sees you sit down") hold this long after the last sighting.
+const DIRECTOR_RUN_FLAG_HOLD_SECONDS := 0.3
+## Seconds between the end of a visit (thrown out, climbed) and visit_finished.
+const DIRECTOR_VISIT_END_SECONDS := 1.5
+## Patrons on the floor per CasinoMap size class.
+const DIRECTOR_PATRONS := {&"small": 10, &"medium": 18, &"large": 26}
+## At most this many pit bosses (one per table-area post).
+const DIRECTOR_MAX_PIT_BOSSES := 2
+## A knocked-over tray or chip tower is stood back up after this long.
+const DIRECTOR_TRAY_RESET_SECONDS := 20.0
+## The celebrate pose after a winning bet.
+const DIRECTOR_CELEBRATE_SECONDS := 1.2
+## Thrown-chip burst: chips drawn; noise ring: grow time and largest drawn radius.
+const DIRECTOR_THROW_CHIPS := 14
+const DIRECTOR_NOISE_RING_SECONDS := 0.8
+const DIRECTOR_NOISE_RING_MAX_RADIUS := 12.0
+## Sitting down turns the player's camera to face the table at this pitch, and
+## shifts the view (Camera3D.v_offset, metres) so the table clears the bet panel.
+const DIRECTOR_SEATED_CAMERA_PITCH_DEGREES := -38.0
+const DIRECTOR_SEATED_CAMERA_V_OFFSET := -1.6
+
+# --- autopilot playtest fixes (broke crew, cashier withdraw) ------------------
+## Above Sal's, a crew that can't cover a bet (pockets and bank under the min
+## bet) is thrown out after this long on the floor instead of being stuck.
+const BROKE_GRACE_SECONDS := 10.0
+## The cashier's "take out of the crew bank" button takes at most this many max bets.
+const UI_WITHDRAW_MAX_BETS := 10

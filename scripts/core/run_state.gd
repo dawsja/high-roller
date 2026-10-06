@@ -4,9 +4,10 @@ extends RefCounted
 ## "Scoring and progression"). Persists while FloorSim is rebuilt per visit.
 ## Host-owned.
 ##
-## Two chip pools: `bank` is spendable on buy-ins and carries between visits
-## (banked chips are safe, even through a throw-out); `top_banked` is what was
-## banked at The Apex and is the score, never spent. A new visit (climb,
+## Two chip pools: `bank` is spendable on buy-ins, can be taken back out at
+## the cashier (withdraw) and carries between visits (banked chips are safe,
+## even through a throw-out); `top_banked` is what was banked at The Apex and
+## is the score, never spent. A new visit (climb,
 ## throw-out or curb timeout) clears strikes and per-visit state.
 
 signal strike_added(strikes: int)
@@ -81,10 +82,13 @@ func add_strike() -> bool:
 
 ## Drops the crew one rung (bank is kept) and starts a new visit. At the
 ## bottom it is a curb timeout: the rung stays, everything else is the same.
-## Returns the new rung.
-func throw_out() -> int:
+## `to_rung` (> rung) drops further, e.g. a broke crew straight to where the
+## bank covers a bet. Returns the new rung.
+func throw_out(to_rung: int = -1) -> int:
 	var from := rung
 	rung = CasinoLadder.drop_target(rung)
+	if to_rung > rung and CasinoLadder.is_valid_rung(to_rung):
+		rung = to_rung
 	_start_visit()
 	thrown_out.emit(from, rung)
 	return rung
@@ -117,6 +121,15 @@ func climb() -> int:
 	_start_visit()
 	climbed.emit(from, rung)
 	return rung
+
+
+## Takes chips back out of the crew bank (never `top_banked`, the score).
+## False (nothing taken) for a non-positive amount or more than the bank holds.
+func withdraw(amount: int) -> bool:
+	if amount <= 0 or amount > bank:
+		return false
+	bank -= amount
+	return true
 
 
 ## Marks the once-per-visit fire alarm as pulled. False if already used.
