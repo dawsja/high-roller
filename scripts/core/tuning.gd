@@ -183,3 +183,30 @@ const TOP_RUNG := 1
 const BOTTOM_RUNG := 6
 ## Bank this multiple of the buy-in to skip a rung.
 const STRETCH_MULT := 2
+
+# --- identity_looks (outfits and wanted posters) ------------------------------
+## Gift-shop price of an outfit piece by its catalog tier (index = tier).
+## Tier 0 is free / not sold ("none" pieces and staff uniform pieces).
+const OUTFIT_TIER_PRICES := [0, 40, 100, 250]
+
+# --- table_games module -----------------------------------------------------
+## The bottom this-many rungs reskin the games (coin pusher, scratch cards, bingo, ...).
+const TABLE_RESKIN_RUNGS := 2
+## Blackjack: when a winning player stands on 18+, the share of hands where the
+## dealer busts (otherwise the dealer stands on a lower total).
+const BLACKJACK_DEALER_BUST_SHARE := 0.5
+## UNUSED (kept so nothing that names it breaks): a reckless-hit threshold
+## gave free cooling on pre-rolled losses, so now only hitting past 21 is a
+## thrown blackjack hand. Safe to delete once nothing references it.
+const BLACKJACK_RECKLESS_HIT_TOTAL := 17
+
+# --- identity_ids (fake IDs, ID quiz, forger) -------------------------------
+## Birth years printed on generated IDs (inclusive). Everyone is well over 21.
+const ID_BIRTH_YEAR_MIN := 1941
+const ID_BIRTH_YEAR_MAX := 2000
+## A decoy birthday in the ID quiz is at most this many years off the real one.
+const ID_QUIZ_DECOY_YEAR_SPREAD := 6
+
+# --- guards (GuardBrain) ----------------------------------------------------
+## A guard waiting at a noise or search spot turns its view around this fast.
+const GUARD_LOOK_AROUND_DEGREES_PER_SECOND := 90.0
